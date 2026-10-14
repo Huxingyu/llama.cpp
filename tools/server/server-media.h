@@ -68,6 +68,7 @@ struct server_media_context {
     server_tokens process_prompt(
             const std::string & prompt,
             const std::vector<raw_buffer> & files,
+            const mtmd_helper_init_opt & init_opt,
             bool is_placeholder = false);
 
     int32_t encode_mtmd_batch(mtmd_batch * batch) const;

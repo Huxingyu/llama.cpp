@@ -2565,7 +2565,7 @@ private:
         try {
             auto & prompt = task.cli_prompt;
             if (media != nullptr && media->supports_prompt_embeddings()) {
-                task.tokens = media->process_prompt(prompt, task.cli_files);
+                task.tokens = media->process_prompt(prompt, task.cli_files, init_opt);
             } else {
                 task.tokens = std::move(tokenize_input_prompts(vocab, mctx, prompt, true, true, init_opt)[0]);
             }
@@ -4231,17 +4231,26 @@ private:
 
             const auto & chunk = input_tokens.find_chunk(cur_token_idx);
 
-            float * embd = slot.mbatch ? mtmd_batch_get_output_embd(slot.mbatch.get(), chunk.get()) : nullptr;
+            if (chunk->is_embd()) {
+                // SMT media chunks are decoded via process_mtmd_chunk(), not as batch embeddings
+                SLT_ERR(slot, "%s", "SMT media chunks are not supported in mixed batches\n");
+                batch.truncate(n_tokens_prev);
+                send_error(slot, "SMT media chunks are not supported in mixed batches", ERROR_TYPE_SERVER);
+                slot.release();
+                return false;
+            }
+
+            float * embd = slot.mbatch ? mtmd_batch_get_output_embd(slot.mbatch.get(), chunk->mtmd.get()) : nullptr;
             if (!embd) {
                 // encode on the worker thread, so we can still handle metrics tasks
                 int32_t res = 0;
                 queue_tasks.yield_to_queue([&]() {
                     res = encode_mtmd_chunk(slot, slot.mbatch, cur_token_idx);
                 });
-                embd = res == 0 ? mtmd_batch_get_output_embd(slot.mbatch.get(), chunk.get()) : nullptr;
+                embd = res == 0 ? mtmd_batch_get_output_embd(slot.mbatch.get(), chunk->mtmd.get()) : nullptr;
             }
 
-            if (!embd || !add_mtmd_chunk(slot, chunk.get(), embd, batch)) {
+            if (!embd || !add_mtmd_chunk(slot, chunk->mtmd.get(), embd, batch)) {
                 SLT_ERR(slot, "%s", "failed to process mtmd chunk\n");
                 // the batch must not keep the entries of a released slot
                 batch.truncate(n_tokens_prev);
@@ -4250,7 +4259,7 @@ private:
                 return false;
             }
 
-            slot.prompt.tokens.push_back_placeholder(chunk.get());
+            slot.prompt.tokens.push_back_placeholder(chunk->mtmd.get());
         }
 
         return true;
@@ -4980,7 +4989,7 @@ std::unique_ptr<server_res_generator> server_routes::handle_completions_impl(
                 ctx_server.media != nullptr &&
                 ctx_server.media->supports_prompt_embeddings()) {
             // OAI-compatible chat path pre-resolves media files into backend-neutral media chunks.
-            inputs.push_back(ctx_server.media->process_prompt(prompt.get<std::string>(), files));
+            inputs.push_back(ctx_server.media->process_prompt(prompt.get<std::string>(), files, ctx_server.init_opt));
         } else {
             // Everything else, including multimodal completions.
             inputs = tokenize_input_prompts(ctx_server.vocab, ctx_server.mctx, prompt, true, true, ctx_server.init_opt);

@@ -61,12 +61,11 @@ std::vector<std::pair<std::string, std::string>> parse_hotwords(const json & bod
             if (!item.is_object()) {
                 throw std::invalid_argument("hotwords array entries must be objects");
             }
-            const auto from = item.find("from");
-            const auto to   = item.find("to");
-            if (from == item.end() || to == item.end() || !from->is_string() || !to->is_string()) {
+            if (!item.contains("from") || !item.contains("to") ||
+                    !item.at("from").is_string() || !item.at("to").is_string()) {
                 throw std::invalid_argument("hotwords entries require string from and to fields");
             }
-            append(from->get<std::string>(), to->get<std::string>());
+            append(item.at("from").get<std::string>(), item.at("to").get<std::string>());
         }
         return result;
     }
@@ -85,29 +84,33 @@ std::string server_tts_request_text(const json & body) {
     if (!body.is_object()) {
         throw std::invalid_argument("request body must be a JSON object");
     }
-    const auto input = body.find("input");
-    if (input == body.end() || !input->is_string() || input->get_ref<const std::string &>().empty()) {
+    if (!body.contains("input") || !body.at("input").is_string()) {
         throw std::invalid_argument("input must be a non-empty string");
     }
-    if (input->get_ref<const std::string &>().size() > max_input_bytes) {
+    const std::string input_str = body.at("input");
+    if (input_str.empty()) {
+        throw std::invalid_argument("input must be a non-empty string");
+    }
+    if (input_str.size() > max_input_bytes) {
         throw std::invalid_argument("input is too large");
     }
-    if (const auto format = body.find("response_format");
-        format != body.end() && (!format->is_string() || format->get<std::string>() != "wav")) {
+    if (body.contains("response_format") &&
+            (!body.at("response_format").is_string() || body.at("response_format").get<std::string>() != "wav")) {
         throw std::invalid_argument("response_format must be wav");
     }
-    if (const auto speed = body.find("speed");
-        speed != body.end() &&
-        (!speed->is_number() || !std::isfinite(speed->get<double>()) || std::abs(speed->get<double>() - 1.0) > 1e-9)) {
-        throw std::invalid_argument("speed must be 1.0");
+    if (body.contains("speed")) {
+        const auto & speed = body.at("speed");
+        if (!speed.is_number() || !std::isfinite(speed.get<double>()) || std::abs(speed.get<double>() - 1.0) > 1e-9) {
+            throw std::invalid_argument("speed must be 1.0");
+        }
     }
     for (const char * field : { "model", "voice" }) {
-        if (const auto value = body.find(field); value != body.end() && !value->is_string()) {
+        if (body.contains(field) && !body.at(field).is_string()) {
             throw std::invalid_argument(std::string(field) + " must be a string");
         }
     }
 
-    std::string text = input->get<std::string>();
+    std::string text = input_str;
     for (const auto & [from, to] : parse_hotwords(body)) {
         replace_all(text, from, to);
     }

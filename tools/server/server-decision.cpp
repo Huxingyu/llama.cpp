@@ -874,8 +874,8 @@ void server_decision_context::fill_task_d1omni(
         for (size_t i = 0; i < media.size(); i++) {
             if (media[i] == LLAMA_TOKEN_NULL) {
                 const auto & chunk = media.find_chunk(i);
-                is_audio = is_audio || mtmd_input_chunk_get_type(chunk.get()) == MTMD_INPUT_CHUNK_TYPE_AUDIO;
-                i += mtmd_input_chunk_get_n_tokens(chunk.get()) - 1;
+                is_audio = is_audio || chunk->type() == server_media_chunk_type::audio;
+                i += chunk->n_tokens() - 1;
             }
         }
     }

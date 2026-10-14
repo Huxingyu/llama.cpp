@@ -668,7 +668,7 @@ std::unique_ptr<server_media_context> server_media_context::init_tts(const commo
     ctx->pimpl->mode = server_media_backend::smt;
     ctx->pimpl->worker = std::make_unique<media_worker>("smt-tts");
     ctx->pimpl->smt_tts = ctx->pimpl->worker->invoke("smt_tts_init", [&]() {
-        return smt_tts_context::create(params.smt_config_dir, params.vocoder.speaker_file);
+        return smt_tts_context::create(params.smt_config_dir, params.tts_speaker_file);
     });
     if (!ctx->pimpl->smt_tts) {
         throw std::runtime_error("failed to initialize SMT TTS backend");
@@ -816,13 +816,14 @@ std::unique_ptr<server_media_context> server_media_context::init(
 server_tokens server_media_context::process_prompt(
         const std::string & prompt_in,
         const std::vector<raw_buffer> & files,
+        const mtmd_helper_init_opt & init_opt,
         bool is_placeholder) {
     if (pimpl->mode == server_media_backend::mtmd) {
         return pimpl->worker->invoke("mtmd_process_prompt", [&]() {
             mtmd::bitmaps bitmaps;
             std::vector<mtmd_helper::video_ptr> videos;
             for (auto & file : files) {
-                auto out = mtmd_helper_bitmap_init_from_buf(pimpl->mtmd_ctx.get(), file.data(), file.size(), is_placeholder);
+                auto out = mtmd_helper_bitmap_init_from_buf(pimpl->mtmd_ctx.get(), file.data(), file.size(), is_placeholder, init_opt);
                 if (!out.bitmap) {
                     throw std::runtime_error("Failed to load image or audio file");
                 }

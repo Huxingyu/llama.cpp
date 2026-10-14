@@ -125,7 +125,7 @@ static int run_tts_server(const common_params & params) {
         json body;
         try {
             body = json::parse(request.body);
-        } catch (const json::exception &) {
+        } catch (const common_json_error &) {
             throw std::invalid_argument("request body must be valid JSON");
         }
         return server_tts_make_response(media->synthesize(server_tts_request_text(body)));
@@ -156,11 +156,10 @@ static int run_tts_server(const common_params & params) {
     sigaction(SIGTERM, &action, nullptr);
 #endif
 
-    SRV_INF("TTS media backend '%s' is listening on %s\n",
-            media->tts_backend_name(), ctx_http.listening_address.c_str());
-    if (ctx_http.thread.joinable()) {
-        ctx_http.thread.join();
+    for (const auto & address : ctx_http.listening_addresses) {
+        SRV_INF("TTS media backend '%s' is listening on %s\n", media->tts_backend_name(), address.c_str());
     }
+    ctx_http.join(); // keep the main thread alive
     media.reset();
     server_stream_session_manager_stop();
     llama_backend_free();
