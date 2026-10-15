@@ -426,9 +426,11 @@ static bool ggml_backend_spacemit_buffer_type_is_host(ggml_backend_buffer_type_t
 static ggml_backend_buffer_type_i ggml_backend_spacemit_buffer_type_interface = {
     /* .get_name         = */ ggml_backend_spacemit_buffer_type_get_name,
     /* .alloc_buffer     = */ ggml_backend_spacemit_buffer_type_alloc_buffer,
+    /* .alloc_buffer_n   = */ nullptr, // default: alloc_buffer + linear allocator
     /* .get_alignment    = */ ggml_backend_spacemit_buffer_type_get_alignment,
     /* .get_max_size     = */ ggml_backend_spacemit_buffer_type_get_max_size,
     /* .get_alloc_size   = */ ggml_backend_spacemit_buffer_type_get_alloc_size,
+    /* .get_alloc_size_n = */ nullptr, // default: per-tensor get_alloc_size
     /* .is_host          = */ ggml_backend_spacemit_buffer_type_is_host,
 };
 
@@ -653,6 +655,8 @@ static void ggml_backend_spacemit_device_get_props(ggml_backend_dev_t dev, struc
         /* .host_buffer           = */ false,
         /* .buffer_from_host_ptr  = */ false,
         /* .events                = */ false,
+        // the model is mmapped in host memory, then copied into spine pool buffers
+        /* .mmap_support          = */ true,
     };
 }
 
