@@ -3094,6 +3094,10 @@ template <typename T> void forward_get_rows(ggml::spacemit::context & ctx, ggml_
     const int cr0 = dc * cols_ith;
     const int cr1 = MIN(cr0 + dc, nc);
 
+    if (ir0 >= ir1 || cr0 >= cr1) {
+        return;
+    }
+
     for (int64_t i = ir0; i < ir1; ++i) {
         const int64_t i12 = i / (ne11 * ne10);
         const int64_t i11 = (i - i12 * ne11 * ne10) / ne10;
@@ -3199,6 +3203,32 @@ static inline float rvv_gdn_fused_row_f32(float *             dst,
     const float delta_j = (v_j - state_k) * beta;
     s = __riscv_vfmacc_vf_f32m8(s, delta_j, kv, vl);
     __riscv_vse32_v_f32m8(dst, s, vl);
+    return (state_q + delta_j * kq) * scale;
+}
+
+// A head that fits in m4 leaves registers for the state and reduction
+// temporaries alongside k, q and decay, avoiding whole-vector row-loop spills.
+static inline float rvv_gdn_fused_row_f32(float *             dst,
+                                          const float *       src,
+                                          const vfloat32m4_t kv,
+                                          const vfloat32m4_t qv,
+                                          const vfloat32m4_t dv,
+                                          const float         v_j,
+                                          const float         beta,
+                                          const float         kq,
+                                          const float         scale,
+                                          const size_t        vl) {
+    vfloat32m4_t s = __riscv_vle32_v_f32m4(src, vl);
+    s = __riscv_vfmul_vv_f32m4(s, dv, vl);
+    vfloat32m1_t sum_k = __riscv_vfmv_v_f_f32m1(0.0f, 1);
+    vfloat32m1_t sum_q = __riscv_vfmv_v_f_f32m1(0.0f, 1);
+    sum_k = __riscv_vfredusum_vs_f32m4_f32m1(__riscv_vfmul_vv_f32m4(s, kv, vl), sum_k, vl);
+    sum_q = __riscv_vfredusum_vs_f32m4_f32m1(__riscv_vfmul_vv_f32m4(s, qv, vl), sum_q, vl);
+    const float state_k = __riscv_vfmv_f_s_f32m1_f32(sum_k);
+    const float state_q = __riscv_vfmv_f_s_f32m1_f32(sum_q);
+    const float delta_j = (v_j - state_k) * beta;
+    s = __riscv_vfmacc_vf_f32m4(s, delta_j, kv, vl);
+    __riscv_vse32_v_f32m4(dst, s, vl);
     return (state_q + delta_j * kq) * scale;
 }
 
@@ -3349,20 +3379,33 @@ void forward_gated_delta_net(ggml::spacemit::context & ctx, ggml_tensor * op) {
             const float kq = rvv_gdn_dot_f32(k, q, S_v);
 
             if (fused) {
-                const size_t vl = __riscv_vsetvl_e32m8(S_v);
-                const vfloat32m8_t kv = __riscv_vle32_v_f32m8(k, vl);
-                const vfloat32m8_t qv = __riscv_vle32_v_f32m8(q, vl);
-                vfloat32m8_t dv;
+                float decay_scalar = 0.0f;
                 if (kda) {
                     for (int64_t i = 0; i < S_v; ++i) kda_decay[i] = expf(g[i]);
-                    dv = __riscv_vle32_v_f32m8(kda_decay, vl);
                 } else {
-                    dv = __riscv_vfmv_v_f_f32m8(expf(g[0]), vl);
+                    decay_scalar = expf(g[0]);
                 }
 
-                for (int64_t j = 0; j < S_v; ++j) {
-                    attn_data[j] = rvv_gdn_fused_row_f32(s_out + j * S_v, s_cur + j * S_v,
-                                                         kv, qv, dv, v[j], beta, kq, scale, vl);
+                if (S_v <= (int64_t) __riscv_vsetvlmax_e32m4()) {
+                    const size_t vl = __riscv_vsetvl_e32m4(S_v);
+                    const vfloat32m4_t kv = __riscv_vle32_v_f32m4(k, vl);
+                    const vfloat32m4_t qv = __riscv_vle32_v_f32m4(q, vl);
+                    const vfloat32m4_t dv = kda ? __riscv_vle32_v_f32m4(kda_decay, vl)
+                                              : __riscv_vfmv_v_f_f32m4(decay_scalar, vl);
+                    for (int64_t j = 0; j < S_v; ++j) {
+                        attn_data[j] = rvv_gdn_fused_row_f32(s_out + j * S_v, s_cur + j * S_v,
+                                                           kv, qv, dv, v[j], beta, kq, scale, vl);
+                    }
+                } else {
+                    const size_t vl = __riscv_vsetvl_e32m8(S_v);
+                    const vfloat32m8_t kv = __riscv_vle32_v_f32m8(k, vl);
+                    const vfloat32m8_t qv = __riscv_vle32_v_f32m8(q, vl);
+                    const vfloat32m8_t dv = kda ? __riscv_vle32_v_f32m8(kda_decay, vl)
+                                              : __riscv_vfmv_v_f_f32m8(decay_scalar, vl);
+                    for (int64_t j = 0; j < S_v; ++j) {
+                        attn_data[j] = rvv_gdn_fused_row_f32(s_out + j * S_v, s_cur + j * S_v,
+                                                           kv, qv, dv, v[j], beta, kq, scale, vl);
+                    }
                 }
                 s_cur = s_out;
             } else {
@@ -3451,26 +3494,56 @@ void forward_cpy_strided_f32(ggml::spacemit::context & ctx, ggml_tensor * op) {
     const int64_t ne    = ggml_nelements(src0);
     const int64_t ith   = ctx.ith;
     const int64_t nth   = ctx.nth;
+
+    // Include the source row gaps when checking for overlap. Keep aliased
+    // views on the coordinate-aware path below.
+    const uintptr_t src_begin = reinterpret_cast<uintptr_t>(src0->data);
+    const uintptr_t dst_begin = reinterpret_cast<uintptr_t>(dst->data);
+    const size_t src_bytes = ggml_nbytes(src0);
+    const size_t dst_bytes = ggml_nbytes(dst);
+    const bool disjoint = src_begin < dst_begin ? dst_begin - src_begin >= src_bytes
+                                               : src_begin - dst_begin >= dst_bytes;
+
+    // The convolution state view contains three floats out of each four-float
+    // row. Load exactly those three fields, including on the final row where
+    // a four-field load would read beyond the backing allocation.
+    if (disjoint && src0->ne[0] == 3 && src0->ne[2] == 1 && src0->ne[3] == 1 &&
+        src0->nb[0] == sizeof(float) && src0->nb[1] == 4 * sizeof(float)) {
+        const int64_t rows_per_thread = (src0->ne[1] + nth - 1) / nth;
+        const int64_t row0 = rows_per_thread * ith;
+        const int64_t row1 = MIN(row0 + rows_per_thread, src0->ne[1]);
+        if (row0 >= row1) {
+            return;
+        }
+
+        for (int64_t row = row0; row < row1;) {
+            const size_t vl = __riscv_vsetvl_e32m1(row1 - row);
+            const float * src_ptr = (const float *) ((const char *) src0->data + row * src0->nb[1]);
+            float * dst_ptr = (float *) dst->data + 3 * row;
+            const vfloat32m1x3_t rows = __riscv_vlsseg3e32_v_f32m1x3(src_ptr, 4 * sizeof(float), vl);
+            __riscv_vsseg3e32_v_f32m1x3(dst_ptr, rows, vl);
+            row += vl;
+        }
+        return;
+    }
+
     const int64_t dr    = (ne + nth - 1) / nth;
     const int64_t i0    = dr * ith;
     const int64_t i1    = MIN(i0 + dr, ne);
+    if (i0 >= i1) {
+        return;
+    }
 
     // A contiguous source can be copied with the RVV memcpy primitive, but
     // CPY is also used for state/view updates where source and destination
     // may alias.  Only take the flat-copy path when the complete byte ranges
     // are disjoint; otherwise retain the coordinate-aware implementation
     // below (which is safe for exact/self-overlapping views).
-    if (ggml_is_contiguous(src0)) {
-        const uintptr_t src_begin = reinterpret_cast<uintptr_t>(src0->data);
-        const uintptr_t dst_begin = reinterpret_cast<uintptr_t>(dst->data);
-        const uintptr_t bytes     = (uintptr_t) ne * sizeof(float);
-        const bool disjoint = dst_begin >= src_begin + bytes || src_begin >= dst_begin + bytes;
-        if (disjoint) {
-            memcpy1d((char *) dst->data + i0 * sizeof(float),
-                     (const char *) src0->data + i0 * sizeof(float),
-                     (i1 - i0) * sizeof(float));
-            return;
-        }
+    if (disjoint && ggml_is_contiguous(src0)) {
+        memcpy1d((char *) dst->data + i0 * sizeof(float),
+                 (const char *) src0->data + i0 * sizeof(float),
+                 (i1 - i0) * sizeof(float));
+        return;
     }
 
     float *       dst_ptr = (float *) dst->data + i0;
