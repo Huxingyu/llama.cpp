@@ -840,13 +840,12 @@ static int encode_mtmd_chunk(const server_slot & slot, mtmd::batch_ptr & mbatch,
 }
 
 static int process_mtmd_chunk(const server_slot & slot, mtmd::batch_ptr & mbatch, size_t idx, size_t & n_tokens_out) {
-    GGML_ASSERT(slot.mctx);
-    const auto & mctx = slot.mctx;
     const auto & input_tokens = slot.task->tokens;
     const auto & chunk = input_tokens.find_chunk(idx);
     int32_t res = 0;
 
     // SMT media backend: decode the precomputed embedding chunk directly
+    // (no mtmd context is used on this path, slot.mctx may be null)
     if (chunk->is_embd()) {
         if (slot.media == nullptr || chunk->embd == nullptr) {
             return -1;
@@ -872,6 +871,8 @@ static int process_mtmd_chunk(const server_slot & slot, mtmd::batch_ptr & mbatch
         return 0;
     }
 
+    GGML_ASSERT(slot.mctx);
+    const auto & mctx = slot.mctx;
     GGML_ASSERT(chunk->mtmd != nullptr);
 
     auto try_decode = [&]() -> int32_t {
@@ -1292,7 +1293,9 @@ private:
             return false;
         }
 
-        if (ctx_tgt == nullptr) {
+        // In dedicated multi-ASR mode the context is created by the scheduler
+        // below, so the null check is deferred until after that block.
+        if (ctx_tgt == nullptr && !use_multi_asr) {
             SRV_ERR("failed to create_context with model '%s'\n", params_base.model.path.c_str());
             return false;
         }
@@ -1305,8 +1308,6 @@ private:
             SRV_ERR("failed to init decision model: %s\n", e.what());
             return false;
         }
-
-        n_ctx = llama_n_ctx(ctx_tgt);
 
         add_bos_token = llama_vocab_get_add_bos(vocab);
 
