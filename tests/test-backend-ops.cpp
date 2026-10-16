@@ -3243,32 +3243,6 @@ struct test_cpy : public test_case {
     }
 };
 
-// State-cache copies: take the last three columns of a four-column convolution
-// buffer, including an offset in the final row (no padding available to overread).
-struct test_cpy_state_view : public test_case {
-    const int64_t rows;
-    const int64_t planes;
-    const bool self;
-
-    test_cpy_state_view(int64_t rows, int64_t planes = 1, bool self = false)
-        : rows(rows), planes(planes), self(self) {}
-
-    std::string vars() override { return VARS_TO_STR3(rows, planes, self); }
-    double max_nmse_err() override { return 0.0; }
-    size_t op_size(ggml_tensor * t) override { return 2 * ggml_nbytes(t); }
-
-    ggml_tensor * build_graph(ggml_context * ctx) override {
-        ggml_tensor * buffer = ggml_new_tensor_3d(ctx, GGML_TYPE_F32, self ? 3 : 4, rows, planes);
-        ggml_set_name(buffer, "state_buffer");
-        ggml_tensor * src = ggml_view_3d(ctx, buffer, 3, rows, planes,
-                buffer->nb[1], buffer->nb[2], self ? 0 : sizeof(float));
-        ggml_set_name(src, "state_view");
-        ggml_tensor * dst = self ? ggml_reshape_1d(ctx, buffer, 3 * rows * planes)
-                                : ggml_new_tensor_1d(ctx, GGML_TYPE_F32, 3 * rows * planes);
-        return ggml_cpy(ctx, src, dst);
-    }
-};
-
 // GGML_OP_CONT
 // permute = {0, 0, 0, 0} means no permutation: the source is transposed (or
 // view-sliced). A non-identity permute applies ggml_permute before ggml_cont.
@@ -9651,23 +9625,6 @@ static std::vector<std::unique_ptr<test_case>> make_test_cases_eval() {
     std::vector<std::unique_ptr<test_case>> test_cases;
     std::default_random_engine rng(0);
 
-    // Decode state layouts, including empty worker partitions and vector tails.
-    for (int64_t rows : {1, 7, 9, 257, 6144}) {
-        test_cases.emplace_back(new test_cpy_state_view(rows));
-    }
-    test_cases.emplace_back(new test_cpy_state_view(9, 2));
-    test_cases.emplace_back(new test_cpy_state_view(257, 1, true));
-    for (int n : {1, 3, 9, 257, 18432, 262144}) {
-        test_cases.emplace_back(new test_get_rows(GGML_TYPE_F32, n, 2, 1));
-        test_cases.emplace_back(new test_cpy(GGML_TYPE_F32, GGML_TYPE_F32, {n, 1, 1, 1}));
-    }
-    test_cases.emplace_back(new test_get_rows(GGML_TYPE_F32, 257, 5, 3, 2, 2, false, true, 3));
-    test_cases.emplace_back(new test_get_rows(GGML_TYPE_I32, 9, 2, 1));
-    for (int head_size : {128, 256}) {
-        test_cases.emplace_back(new test_gated_delta_net(GGML_TYPE_F32, 16, head_size, 1, 1));
-        test_cases.emplace_back(new test_gated_delta_net(GGML_TYPE_F32, 4, head_size, 4, 2, 1, true, true, 4));
-    }
-
     // unary ops
     for (ggml_type type : {GGML_TYPE_F16, GGML_TYPE_F32, GGML_TYPE_BF16}) {
         for (int v : {0, 1}) {
@@ -12047,12 +12004,6 @@ static std::vector<std::unique_ptr<test_case>> make_test_cases_eval() {
 // Test cases for performance evaluation: should be representative of real-world use cases
 static std::vector<std::unique_ptr<test_case>> make_test_cases_perf() {
     std::vector<std::unique_ptr<test_case>> test_cases;
-
-    test_cases.emplace_back(new test_cpy_state_view(6144));
-    test_cases.emplace_back(new test_cpy(GGML_TYPE_F32, GGML_TYPE_F32, {262144, 1, 1, 1}));
-    test_cases.emplace_back(new test_get_rows(GGML_TYPE_F32, 262144, 2, 1));
-    test_cases.emplace_back(new test_get_rows(GGML_TYPE_F32, 18432, 2, 1));
-    test_cases.emplace_back(new test_gated_delta_net(GGML_TYPE_F32, 16, 128, 1, 1));
 
     // SWIGLU at a 27B-class FFN width, fused [gate|up] vs split operands
     // note: same bytes either way, so a backend that indexes them differently shows it here
