@@ -13,6 +13,8 @@
 #include "scalar_kernels.h"
 #include "spacemit-context.h"
 #include "spacemit-env.h"
+#include "spacemit-fused.h"
+#include "spacemit-opnode.h"
 #include "spine_mem_pool.h"
 #include "vec.h"
 
@@ -26,8 +28,12 @@
 #include <cerrno>
 #include <cmath>
 #include <cstdio>  // for GGML_ASSERT
+#include <cstdlib>
+#include <cstring>
 #include <stdexcept>
+#include <string>
 #include <thread>
+#include <vector>
 // clang-format off
 #if defined(__riscv)
 
@@ -176,6 +182,7 @@ class tensor_traits : public ggml::spacemit::tensor_traits_base {
                     case GGML_TYPE_Q4_K:
                     case GGML_TYPE_Q6_K:
                     case GGML_TYPE_Q8_0:
+                    case GGML_TYPE_Q5_0:
                     case GGML_TYPE_Q5_1:
                     case GGML_TYPE_Q5_K:
                         //case GGML_TYPE_MXFP4:
@@ -194,6 +201,7 @@ class tensor_traits : public ggml::spacemit::tensor_traits_base {
                     case GGML_TYPE_Q4_K:
                     case GGML_TYPE_Q6_K:
                     case GGML_TYPE_Q8_0:
+                    case GGML_TYPE_Q5_0:
                     case GGML_TYPE_Q5_1:
                     case GGML_TYPE_Q5_K:
                         //case GGML_TYPE_MXFP4:
@@ -983,6 +991,9 @@ class tensor_traits_common : public ggml::spacemit::tensor_traits_base {
                     // Per-thread: VKQ accmulator (DV), partial M, partial S + intra-thread scratch for V, Q and VKQ
                     size_t n_chunks = n_tasks;
                     size_t decode   = sizeof(float) * n_tasks * (DK + 2 * DV + 64);
+                    // split-KV decode partials (up to 4 query tokens, FA_SPLIT_KV_MAX_Q)
+                    const size_t n_q = (size_t) std::min<int64_t>(op->src[0]->ne[1], 4);
+                    decode = MAX(decode, sizeof(float) * (n_q * neq2 * n_chunks * (2 + DV) + n_tasks * (DK + 2 * DV)));
 
                     size = MAX(prefill, decode);
                 }
@@ -1188,6 +1199,14 @@ class tensor_traits_common : public ggml::spacemit::tensor_traits_base {
                         spacemit_kernels::rvv::forward_cpy_strided_f32(ctx, op);
                         return true;
                     }
+                    // row-contiguous F32 copy with arbitrary outer strides (GDN rollback snapshots)
+                    if (op->type == GGML_TYPE_F32 && src0->type == GGML_TYPE_F32 &&
+                        op->nb[0] == sizeof(float) && src0->nb[0] == sizeof(float) &&
+                        op->ne[0] == src0->ne[0] && op->ne[1] == src0->ne[1] &&
+                        op->ne[2] == src0->ne[2] && op->ne[3] == src0->ne[3]) {
+                        spacemit_kernels::rvv::forward_cpy_f32_row_strided(ctx, op);
+                        return true;
+                    }
                     if (ggml_is_contiguous(op) && ggml_is_contiguous(src0) &&
                         ggml_nelements(src0) == ggml_nelements(op)) {
                         if (op->type == GGML_TYPE_F16 && src0->type == GGML_TYPE_F32) {
@@ -1267,6 +1286,9 @@ class tensor_traits_common : public ggml::spacemit::tensor_traits_base {
                 return true;
             case GGML_OP_CONCAT:
                 {
+                    if (spacemit_kernels::rvv::forward_concat_dim0_transposed_f32(ctx, op, 0)) {
+                        return true;
+                    }
                     const int32_t dim = ggml_get_op_params_i32(op, 0);
                     if (dim == 0 && op->type == op->src[0]->type) {
                         switch (op->src[0]->type) {
@@ -1312,13 +1334,32 @@ class tensor_traits_common : public ggml::spacemit::tensor_traits_base {
             case GGML_OP_GATED_DELTA_NET:
                 spacemit_kernels::rvv::forward_gated_delta_net(ctx, op);
                 return true;
+            case GGML_OP_ARGSORT:
+                spacemit_kernels::scalar::forward_argsort_f32(ctx, op);
+                return true;
+            case GGML_OP_CLAMP:
+                spacemit_kernels::scalar::forward_clamp_f32(ctx, op);
+                return true;
             case GGML_OP_SSM_CONV:
-                spacemit_kernels::scalar::forward_ssm_conv_f32(ctx, op);
+                if (!spacemit_kernels::rvv::forward_ssm_conv_f32(ctx, op)) {
+                    spacemit_kernels::scalar::forward_ssm_conv_f32(ctx, op);
+                }
                 return true;
             default:
                 break;
         }
         return false;
+    }
+
+    bool compute_forward_fused(ggml::spacemit::context & ctx, const spacemit_opnode & node) const override {
+        switch (node.opcode) {
+            case SPACEMIT_OP_RMS_NORM_MUL:
+                // out = rms_norm(x) * w in one pass; node.node = RMS_NORM, node.fused[0] = MUL
+                spacemit_kernels::rvv::forward_rms_norm_mul_f32(ctx, node.node, node.fused[0]);
+                return true;
+            default:
+                return false;
+        }
     }
 
     bool forward_flash_attn_ext_f16(ggml::spacemit::context & ctx, ggml_tensor * dst) const {
@@ -1340,7 +1381,7 @@ class tensor_traits_common : public ggml::spacemit::tensor_traits_base {
 
         const bool supported_prec  = (dst->op_params[3] == GGML_PREC_F32 || dst->op_params[3] == GGML_PREC_DEFAULT);
         const bool supported_types = (q->type == GGML_TYPE_F32 && k->type == GGML_TYPE_F16 && v->type == GGML_TYPE_F16);
-        const bool supported_shape = (DK > 0 && DK <= 128 && DV > 0 && DV <= 128);
+        const bool supported_shape = (DK > 0 && DK <= 256 && DV > 0 && DV <= 256);
         const bool supported_vlen  = (__riscv_vlenb() == 128);
 
         if (!(supported_prec && supported_types && supported_shape && supported_vlen)) {
@@ -1365,6 +1406,20 @@ class tensor_traits_common : public ggml::spacemit::tensor_traits_base {
         // if (nth == 1 || nchunk < nth) {
         //     nchunk = nth;
         // }
+
+        // decode / MTP verification (1-4 query tokens): split the KV range across threads so each K/V row is
+        // read once, then merge the partials (ported from ggml-cpu/spacemit)
+        const int n_split = (!use_tiled && ctx.shared.data != nullptr) ?
+                                spacemit_kernels::rvv::flash_attn_ext_f16_split_kv_chunks_vlen1024_vf16(dst, nth) :
+                                0;
+        if (n_split > 0) {
+            float * partials = (float *) ctx.workspace;
+            spacemit_kernels::rvv::forward_flash_attn_ext_f16_split_kv_partial_vlen1024_vf16(
+                ctx, dst, n_split, partials, ctx.shared.data, ctx.shared.size);
+            ctx.sync();
+            spacemit_kernels::rvv::forward_flash_attn_ext_f16_split_kv_reduce_vlen1024_vf16(ctx, dst, n_split, partials);
+            return true;
+        }
 
         int64_t nchunk = nth;
 
@@ -1415,7 +1470,15 @@ static const tensor_traits<block_q8_0, 32, 32>  q8_0_32x32_q8_0;
 static const tensor_traits<block_mxfp4, 32, 32> mxfp4_32x32_q8_0;
 static const tensor_traits<block_q5_K, 32, 32>  q5_k_32x32_q8_0;
 static const tensor_traits<block_q5_1, 32, 32>  q5_1_32x32_q8_0;
-static const tensor_traits<block_q5_0, 32, 32>  q5_0_32x32_q8_0;
+
+// Q5_0 weights converted exactly to Q8_0 at load time and run on the Q8_0 IME path
+class tensor_traits_q5_0_as_q8_0 : public tensor_traits<block_q8_0, 32, 32> {
+    int repack(ggml_tensor * t, const void * data, size_t data_size) const override {
+        return repack_q5_0_to_q8_0_32(t, data, data_size);
+    }
+};
+
+static const tensor_traits_q5_0_as_q8_0 q5_0_as_q8_0_32x32;
 // Impl By RVV
 static const tensor_traits_common               rvv_impl;
 
@@ -1546,8 +1609,10 @@ const ggml::spacemit::tensor_traits_base * ggml_spacemit_get_optimal_repack_type
         case GGML_TYPE_Q5_0:
             {
 #if defined(RISCV64_SPACEMIT_IME2)
-                if (cur->ne[1] % 32 == 0 && (ggml::cpu::riscv64_spacemit::global_spine_env_info.use_ime2)) {
-                    return &ggml::cpu::riscv64_spacemit::q5_0_32x32_q8_0;
+                // exact conversion to Q8_0 at load time, run on the Q8_0 IME path
+                if (cur->ne[1] % 32 == 0 && cur->ne[0] % QK8_0 == 0 &&
+                    (ggml::cpu::riscv64_spacemit::global_spine_env_info.use_ime2)) {
+                    return &ggml::cpu::riscv64_spacemit::q5_0_as_q8_0_32x32;
                 }
 #endif
             }
@@ -1630,7 +1695,11 @@ size_t ggml_spacemit_nbytes(ggml_backend_buffer_type_t buft, const ggml_tensor *
             nbytes = remap_block_nbytes(sizeof(block_q5_1), sizeof(spacemit_kernels::nrow_block_q5_1<1>));
             break;
         case GGML_TYPE_Q5_0:
-            nbytes = remap_block_nbytes(sizeof(block_q5_0), sizeof(spacemit_kernels::nrow_block_q5_0<1>));
+            if (ggml_spacemit_get_optimal_repack_type(tensor) == &ggml::cpu::riscv64_spacemit::q5_0_as_q8_0_32x32) {
+                nbytes = remap_block_nbytes(sizeof(block_q5_0), sizeof(block_q8_0), 32);
+            } else {
+                nbytes = remap_block_nbytes(sizeof(block_q5_0), sizeof(spacemit_kernels::nrow_block_q5_0<1>));
+            }
             break;
         default:
             nbytes = add_strided_nbytes(row_nbytes, 1, 1);
@@ -1638,6 +1707,35 @@ size_t ggml_spacemit_nbytes(ggml_backend_buffer_type_t buft, const ggml_tensor *
     }
 
     return nbytes;
+}
+
+bool ggml_spacemit_compute_opnode(ggml::spacemit::context & ctx, const spacemit_opnode & node) {
+    // Single-op opnodes with a special opcode: the two halves of the concat -> ssm_conv fusion.
+    // They run at their original graph positions (see try_fuse_node); the allocator plans buffer
+    // reuse on that order, so they must not be merged into one opnode at the concat position.
+    switch (node.opcode) {
+        case SPACEMIT_OP_CONCAT_STATE:
+            // only the trailing columns read back through views (the conv state update)
+            if (!spacemit_kernels::rvv::forward_concat_dim0_transposed_f32(ctx, node.node,
+                                                                           (int64_t) node.kernel_params[0])) {
+                GGML_ABORT("fused concat state update: unsupported shape");
+            }
+            return true;
+        case SPACEMIT_OP_SSM_CONV_CONCAT:
+            // the concat only materialized its trailing columns; read its inputs directly
+            if (!spacemit_kernels::rvv::forward_ssm_conv_concat_f32(ctx, node.node)) {
+                GGML_ABORT("fused ssm_conv: unsupported shape");
+            }
+            return true;
+        default:
+            break;
+    }
+    // Fused opnodes dispatch through the fused-op table; single-op opnodes keep
+    // the existing traits path.
+    if (!node.fused.empty()) {
+        return ggml_spacemit_compute_fused(ctx, node);
+    }
+    return ggml_spacemit_compute_forward(ctx, node.node);
 }
 
 const ggml::spacemit::tensor_traits_base * ggml_spacemit_get_tensor_traits(const ggml_tensor * op) {
@@ -1755,6 +1853,13 @@ const ggml::spacemit::tensor_traits_base * ggml_spacemit_get_tensor_traits(const
             }
             if (op->src[0] && op->type == GGML_TYPE_F32 && op->src[0]->type == GGML_TYPE_F32 &&
                 ggml_is_contiguous(op) && ggml_nelements(op->src[0]) == ggml_nelements(op)) {
+                return common;
+            }
+            // row-contiguous F32 copy with arbitrary outer strides (GDN rollback-snapshot copies)
+            if (op->src[0] && op->type == GGML_TYPE_F32 && op->src[0]->type == GGML_TYPE_F32 &&
+                op->nb[0] == sizeof(float) && op->src[0]->nb[0] == sizeof(float) &&
+                op->ne[0] == op->src[0]->ne[0] && op->ne[1] == op->src[0]->ne[1] &&
+                op->ne[2] == op->src[0]->ne[2] && op->ne[3] == op->src[0]->ne[3]) {
                 return common;
             }
             if (op->src[0] &&
@@ -1901,6 +2006,16 @@ const ggml::spacemit::tensor_traits_base * ggml_spacemit_get_tensor_traits(const
             break;
         case GGML_OP_SSM_CONV:
             if (op->src[0] && op->src[0]->type == GGML_TYPE_F32)
+                return common;
+            break;
+        case GGML_OP_ARGSORT:
+            if (op->src[0] && op->src[0]->type == GGML_TYPE_F32 && op->type == GGML_TYPE_I32 &&
+                op->src[0]->nb[0] == sizeof(float) && op->nb[0] == sizeof(int32_t))
+                return common;
+            break;
+        case GGML_OP_CLAMP:
+            if (op->src[0] && op->src[0]->type == GGML_TYPE_F32 && op->type == GGML_TYPE_F32 &&
+                op->src[0]->nb[0] == sizeof(float) && op->nb[0] == sizeof(float) && ggml_are_same_shape(op, op->src[0]))
                 return common;
             break;
         case GGML_OP_MUL_MAT:

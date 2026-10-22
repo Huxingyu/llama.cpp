@@ -49,6 +49,19 @@ void forward_flash_attn_ext_f16_one_chunk_vlen1024_vf16(ggml::spacemit::context 
                                                         int                       ir0,
                                                         int                       ir1);
 
+// split-KV decode: returns KV chunks per KV head when applicable, else 0
+int  flash_attn_ext_f16_split_kv_chunks_vlen1024_vf16(const ggml_tensor * dst, int nth);
+void forward_flash_attn_ext_f16_split_kv_partial_vlen1024_vf16(ggml::spacemit::context & ctx,
+                                                               ggml_tensor *               dst,
+                                                               int                         n_chunks,
+                                                               float *                     partials,
+                                                               void *                      tcm_buffer,
+                                                               size_t                      tcm_buffer_size);
+void forward_flash_attn_ext_f16_split_kv_reduce_vlen1024_vf16(ggml::spacemit::context & ctx,
+                                                              ggml_tensor *               dst,
+                                                              int                         n_chunks,
+                                                              const float *               partials);
+
 void forward_flash_attn_ext_f16_tiled_vlen1024_vf16(ggml::spacemit::context & ctx,
                                                     ggml_tensor *             dst,
                                                     int                       ir0,
@@ -66,11 +79,23 @@ template <typename T> void forward_get_rows(ggml::spacemit::context & ctx, ggml_
 
 template <typename T> void forward_concat(ggml::spacemit::context & ctx, ggml_tensor * op);
 void forward_gated_delta_net(ggml::spacemit::context & ctx, ggml_tensor * op);
+// dim-0 concat of a contiguous src0 and a transposed src1 (channels contiguous), vectorized over rows;
+// writes columns >= col0 only
+bool forward_concat_dim0_transposed_f32(ggml::spacemit::context & ctx, ggml_tensor * op, int64_t col0);
+// ssm_conv, d_conv == 4, vectorized over channels
+bool forward_ssm_conv_f32(ggml::spacemit::context & ctx, ggml_tensor * dst);
+// ssm_conv reading its concat(conv_states, transpose(qkv)) inputs directly (fused conv)
+bool forward_ssm_conv_concat_f32(ggml::spacemit::context & ctx, ggml_tensor * dst);
+// RMS_NORM followed by MUL with a weight row, written to the MUL's dst
+void forward_rms_norm_mul_f32(ggml::spacemit::context & ctx, const ggml_tensor * rms, ggml_tensor * mul);
 
 template <ggml_op op_type, typename T> void forward_binary(ggml::spacemit::context & ctx, ggml_tensor * op);
 
 void forward_scale_f32(ggml::spacemit::context & ctx, ggml_tensor * op);
 void forward_cpy_strided_f32(ggml::spacemit::context & ctx, ggml_tensor * op);
+// F32 -> F32 with contiguous rows (nb[0] == sizeof(float)) but arbitrary outer strides on both sides;
+// used by the GDN rollback-snapshot copies into the row-strided cache_s views
+void forward_cpy_f32_row_strided(ggml::spacemit::context & ctx, ggml_tensor * op);
 void forward_cpy_f32_to_f16(ggml::spacemit::context & ctx, ggml_tensor * op);
 void forward_cpy_f16_to_f32(ggml::spacemit::context & ctx, ggml_tensor * op);
 void forward_unary_tanh_f32(ggml::spacemit::context & ctx, ggml_tensor * op);
