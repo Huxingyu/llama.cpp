@@ -37,8 +37,11 @@ Neither setting changes the device type or the sampling algorithm.
 ## Diagnostics
 
 `GGML_EXEC_TRACE=/path/nodes.jsonl` records context roles, shapes/strides/types,
-backend placement, completed graph execution, actual backend dispatch, fused
-members and selected IME layouts. Placement and execution are separate events.
+backend placement, tensor flags, whether a node actually requires computation,
+completed graph execution, actual backend dispatch, fused members and selected
+IME layouts. Empty tensors and nodes without `GGML_TENSOR_FLAG_COMPUTE` remain
+visible in placement records but do not require a kernel dispatch. Placement and
+execution are separate events.
 Diagnostic mode synchronizes asynchronous backends; **do not use it to measure
 performance**. With the variable unset, the normal asynchronous entry point is
 used unchanged.

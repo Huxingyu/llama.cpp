@@ -3,6 +3,7 @@
 // Opt-in diagnostic trace. Completion tracing synchronizes async backends and
 // must never be used for performance measurements. Each event is one JSON line.
 #include "ggml.h"
+#include "ggml-impl.h"
 #include <cstdio>
 #include <cstdlib>
 #include <mutex>
@@ -36,6 +37,9 @@ inline void ggml_exec_trace(const char * phase, const char * backend, const ggml
     }();
     const auto describe = [](const ggml_tensor * t) {
         return std::string("{\"name\":") + ggml_exec_trace_quote(t->name) +
+            ",\"flags\":" + std::to_string(t->flags) +
+            ",\"compute_required\":" +
+            (std::string(!ggml_op_is_empty(t->op) && !ggml_is_empty(t) && (t->flags & GGML_TENSOR_FLAG_COMPUTE) ? "true" : "false")) +
             ",\"type\":" + ggml_exec_trace_quote(ggml_type_name(t->type)) +
             ",\"ne\":[" + std::to_string(t->ne[0]) + "," + std::to_string(t->ne[1]) + "," +
             std::to_string(t->ne[2]) + "," + std::to_string(t->ne[3]) +
