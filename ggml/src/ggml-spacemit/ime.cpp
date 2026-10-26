@@ -955,6 +955,15 @@ class tensor_traits : public ggml::spacemit::tensor_traits_base {
         return true;
     }
 
+    bool can_unpack() const override {
+        return std::is_same_v<BLOC_TYPE, block_q4_0>;
+    }
+
+    void unpack(const ggml_tensor * t, void * data, size_t offset, size_t size) const override {
+        GGML_ASSERT(can_unpack());
+        ggml::cpu::riscv64_spacemit::unpack_q4_0(t, data, offset, size, NB_COLS);
+    }
+
     int repack(ggml_tensor * t, const void * data, size_t data_size) const override {
         GGML_LOG_DEBUG("%s: repack tensor %s with %s_%dx%d\n", __func__, t->name, ggml_type_name(t->type),
                        (int) NB_COLS, (int) INTER_SIZE);

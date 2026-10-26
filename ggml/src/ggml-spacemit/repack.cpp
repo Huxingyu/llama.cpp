@@ -1704,6 +1704,46 @@ static int repack_q5_k_to_q5_1_32_bl(ggml_tensor *              t,
 
 namespace ggml::cpu::riscv64_spacemit {
 
+// Read canonical byte ranges without allocating a second copy of Q4_0 weights.
+void unpack_q4_0(const ggml_tensor * t, void * data, size_t offset, size_t size, int rows) {
+    GGML_ASSERT(rows == 16 || rows == 32);
+    GGML_ASSERT(t->type == GGML_TYPE_Q4_0 && ggml_is_contiguous(t));
+    GGML_ASSERT(offset <= ggml_nbytes(t) && size <= ggml_nbytes(t) - offset);
+    const size_t nblocks = t->ne[0] / QK4_0;
+    auto * output = static_cast<uint8_t *>(data);
+    while (size > 0) {
+        const size_t index = offset / sizeof(block_q4_0);
+        const size_t row = index / nblocks;
+        const size_t col = index % nblocks;
+        const size_t packed_index = (row / rows * nblocks + col) * rows * sizeof(block_q4_0);
+        const auto * packed = static_cast<const uint8_t *>(t->data) + packed_index;
+        block_q4_0 block;
+        memcpy(&block.d, packed + row % rows * sizeof(ggml_half), sizeof(block.d));
+        const uint8_t * qs = packed + rows * sizeof(ggml_half);
+        if (rows == 16) {
+            const uint8_t * lo = qs + row % rows * 8;
+            const uint8_t * hi = lo + rows * 8;
+            for (int j = 0; j < 8; ++j) {
+                block.qs[j]     = (lo[j] & 15) | ((hi[j] & 15) << 4);
+                block.qs[j + 8] = (lo[j] >> 4) | (hi[j] & 240);
+            }
+        } else {
+            const uint8_t * lo = qs + row % rows * 16;
+            const uint8_t * hi = lo + 8;
+            for (int j = 0; j < 8; ++j) {
+                block.qs[2*j]     = (lo[j] & 15) | ((hi[j] & 15) << 4);
+                block.qs[2*j + 1] = (lo[j] >> 4) | (hi[j] & 240);
+            }
+        }
+        const size_t skip = offset % sizeof(block);
+        const size_t count = std::min(size, sizeof(block) - skip);
+        memcpy(output, reinterpret_cast<const uint8_t *>(&block) + skip, count);
+        output += count;
+        offset += count;
+        size -= count;
+    }
+}
+
 template <typename BLOC_TYPE, int64_t INTER_SIZE, int64_t NB_COLS> int repack(ggml_tensor *, const void *, size_t);
 
 template <> int repack<block_q4_0, 32, 16>(ggml_tensor * t, const void * data, size_t data_size) {

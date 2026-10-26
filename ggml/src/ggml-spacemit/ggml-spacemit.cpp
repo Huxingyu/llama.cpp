@@ -394,13 +394,36 @@ static enum ggml_status ggml_backend_spacemit_buffer_init_tensor(ggml_backend_bu
     return GGML_STATUS_SUCCESS;
 }
 
+static const ggml::spacemit::tensor_traits_base * buffer_traits(const ggml_tensor * tensor) {
+    return static_cast<const ggml::spacemit::tensor_traits_base *>(tensor->extra);
+}
+
+// Noninvertible repacks retain canonical bytes in the same accounted allocation.
+// Q4_0, the main MTP format, is read by its inverse with no shadow copy.
+static size_t canonical_offset(const ggml_tensor * tensor) {
+    return GGML_PAD(ggml_spacemit_nbytes(nullptr, tensor), 64);
+}
+
+static void ggml_backend_spacemit_buffer_get_tensor(ggml_backend_buffer_t, const ggml_tensor *, void *, size_t, size_t);
+static void ggml_backend_spacemit_buffer_set_tensor(ggml_backend_buffer_t, ggml_tensor *, const void *, size_t, size_t);
+
 static void ggml_backend_spacemit_buffer_memset_tensor(ggml_backend_buffer_t buffer,
                                                          ggml_tensor *         tensor,
                                                          uint8_t               value,
                                                          size_t                offset,
                                                          size_t                size) {
     GGML_ASSERT(tensor);
-    memset((char *) tensor->data + offset, value, size);
+    GGML_ASSERT(offset <= ggml_nbytes(tensor) && size <= ggml_nbytes(tensor) - offset);
+    if (tensor->extra) {
+        std::vector<uint8_t> canonical(ggml_nbytes(tensor));
+        if (offset != 0 || size != canonical.size()) {
+            ggml_backend_spacemit_buffer_get_tensor(buffer, tensor, canonical.data(), 0, canonical.size());
+        }
+        memset(canonical.data() + offset, value, size);
+        ggml_backend_spacemit_buffer_set_tensor(buffer, tensor, canonical.data(), 0, canonical.size());
+    } else {
+        memset((char *) tensor->data + offset, value, size);
+    }
 
     GGML_UNUSED(buffer);
 }
@@ -420,14 +443,20 @@ static void ggml_backend_spacemit_buffer_set_tensor(ggml_backend_buffer_t buffer
                                                       size_t                size) {
     GGML_ASSERT(offset + size <= ggml_nbytes(tensor));
 
-    // Quantized tensors with tensor traits are physically repacked, so they
-    // must be uploaded atomically. Plain tensors preserve the ggml layout and
-    // support the partial writes used by test-backend-ops and graph inputs.
-    if (tensor->extra) {
-        GGML_ASSERT(offset == 0);
-        GGML_ASSERT(size == ggml_nbytes(tensor));
-        auto ok = ggml_riscv64_spacemit_repack_tensor(tensor, data, size);
-        GGML_ASSERT(ok == 0);
+    if (const auto * traits = buffer_traits(tensor)) {
+        std::vector<uint8_t> canonical;
+        if (offset != 0 || size != ggml_nbytes(tensor)) {
+            canonical.resize(ggml_nbytes(tensor));
+            ggml_backend_spacemit_buffer_get_tensor(buffer, tensor, canonical.data(), 0, canonical.size());
+            memcpy(canonical.data() + offset, data, size);
+            data = canonical.data();
+            size = canonical.size();
+        }
+        if (!traits->can_unpack()) {
+            memcpy(static_cast<char *>(tensor->data) + canonical_offset(tensor), data, size);
+        }
+        const int status = ggml_riscv64_spacemit_repack_tensor(tensor, data, size);
+        GGML_ASSERT(status == 0);
     } else {
         memcpy((char *) tensor->data + offset, data, size);
     }
@@ -440,7 +469,16 @@ static void ggml_backend_spacemit_buffer_get_tensor(ggml_backend_buffer_t buffer
                                                      void *                data,
                                                      size_t                offset,
                                                      size_t                size) {
-    memcpy(data, (const char *) tensor->data + offset, size);
+    GGML_ASSERT(offset <= ggml_nbytes(tensor) && size <= ggml_nbytes(tensor) - offset);
+    if (const auto * traits = buffer_traits(tensor)) {
+        if (traits->can_unpack()) {
+            traits->unpack(tensor, data, offset, size);
+        } else {
+            memcpy(data, static_cast<const char *>(tensor->data) + canonical_offset(tensor) + offset, size);
+        }
+    } else {
+        memcpy(data, (const char *) tensor->data + offset, size);
+    }
     GGML_UNUSED(buffer);
 }
 
@@ -486,7 +524,9 @@ static size_t ggml_backend_spacemit_buffer_type_get_max_size(ggml_backend_buffer
 }
 
 static size_t ggml_backend_spacemit_buffer_type_get_alloc_size(ggml_backend_buffer_type_t buft, const ggml_tensor * tensor) {
-    return ggml_spacemit_nbytes(buft, tensor);
+    const size_t packed = ggml_spacemit_nbytes(buft, tensor);
+    const auto * traits = ggml_spacemit_get_optimal_repack_type(tensor);
+    return traits && !traits->can_unpack() ? GGML_PAD(packed, 64) + ggml_nbytes(tensor) : packed;
 }
 
 static bool ggml_backend_spacemit_buffer_type_is_host(ggml_backend_buffer_type_t buft) {

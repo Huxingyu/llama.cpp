@@ -68,6 +68,11 @@ class tensor_traits_base {
         GGML_UNUSED(node);
         return false;
     }
+    // Layouts with a lossless inverse need no canonical shadow allocation.
+    virtual bool can_unpack() const { return false; }
+    virtual void unpack(const ggml_tensor *, void *, size_t, size_t) const {
+        throw std::runtime_error("ggml-spacemit: layout has no lossless inverse");
+    }
     virtual int  repack(ggml_tensor * tensor, const void * data, size_t size) const     = 0;
 };
 
