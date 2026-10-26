@@ -1,3 +1,4 @@
+#include "ggml-exec-trace.h"
 // Note: porting this file to C++ is a work in progress
 
 #ifdef _WIN32
@@ -600,7 +601,20 @@ enum ggml_status ggml_backend_graph_compute(ggml_backend_t backend, struct ggml_
 
 enum ggml_status ggml_backend_graph_compute_async(ggml_backend_t backend, struct ggml_cgraph * cgraph) {
     GGML_ASSERT(backend);
-    return backend->iface.graph_compute(backend, cgraph);
+    if (!ggml_exec_trace_enabled()) {
+        return backend->iface.graph_compute(backend, cgraph);
+    }
+    for (int i = 0; i < cgraph->n_nodes; ++i) {
+        ggml_exec_trace("placed", ggml_backend_name(backend), cgraph->nodes[i]);
+    }
+    const enum ggml_status status = backend->iface.graph_compute(backend, cgraph);
+    if (status == GGML_STATUS_SUCCESS) {
+        ggml_backend_synchronize(backend);
+        for (int i = 0; i < cgraph->n_nodes; ++i) {
+            ggml_exec_trace("graph_complete", ggml_backend_name(backend), cgraph->nodes[i]);
+        }
+    }
+    return status;
 }
 
 bool ggml_backend_supports_op(ggml_backend_t backend, const struct ggml_tensor * op) {

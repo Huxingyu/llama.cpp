@@ -1,3 +1,4 @@
+#include "../ggml-exec-trace.h"
 #define GGML_COMMON_IMPL_CPP
 #define GGML_COMMON_DECL_CPP
 
@@ -313,6 +314,12 @@ class tensor_traits : public ggml::spacemit::tensor_traits_base {
         if (!set_kernel_impl) {
             GGML_ABORT("no kernel implementation found for the block type");
         }
+        if (ith == 0 && ggml_exec_trace_enabled()) {
+            const std::string label = std::string(global_spine_env_info.use_ime2 ? "IME2" : "IME1") +
+                "/" + ggml_type_name(src0->type) + "/" + std::to_string(NB_COLS) + "x" + std::to_string(INTER_SIZE);
+            ggml_exec_trace("kernel_selected", "SPACEMIT0", op, label.c_str());
+        }
+
 
         const int64_t a_k_blks = spacemit_kernels::div_round_up(gemm_k, a_blk_len);
         const int64_t b_k_blks = spacemit_kernels::div_round_up(gemm_k, b_blk_len);
@@ -640,6 +647,12 @@ class tensor_traits : public ggml::spacemit::tensor_traits_base {
         if (!set_kernel_impl) {
             GGML_ABORT("no kernel implementation found for the block type");
         }
+        if (ith == 0 && ggml_exec_trace_enabled()) {
+            const std::string label = std::string(global_spine_env_info.use_ime2 ? "IME2" : "IME1") +
+                "/" + ggml_type_name(src0->type) + "/" + std::to_string(NB_COLS) + "x" + std::to_string(INTER_SIZE);
+            ggml_exec_trace("kernel_selected", "SPACEMIT0", op, label.c_str());
+        }
+
 
         const size_t a_k_blks = spacemit_kernels::div_round_up(ne10, a_blk_len);
         const size_t b_k_blks = spacemit_kernels::div_round_up(ne10, b_blk_len);

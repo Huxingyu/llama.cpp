@@ -688,6 +688,7 @@ static ggml_status ggml_backend_spacemit_graph_compute(ggml_backend_t backend, g
 
                 ggml_profile_log_spacemit_op_begin(op, (int) ith, (int) runtime->grid_dim(0));
 
+                const int64_t trace_start = ith == 0 && ggml_exec_trace_enabled() ? ggml_time_us() : 0;
                 if (!ggml_spacemit_compute_opnode(ctx, node)) {
                     throw std::runtime_error(std::string("ggml-spacemit: failed to dispatch op ") +
                                              ggml_op_desc(op) + " (" + ggml_type_name(op->type) + ")");
@@ -698,6 +699,13 @@ static ggml_status ggml_backend_spacemit_graph_compute(ggml_backend_t backend, g
                 // the next one. A bounded pointer look-ahead is not sufficient:
                 // dependencies can be farther away or hidden behind aliases/views.
                 ctx.sync();
+                if (ith == 0 && ggml_exec_trace_enabled()) {
+                    const auto label = node.op_name();
+                    ggml_exec_trace("dispatch_complete", "SPACEMIT0", op, label.c_str(), ggml_time_us() - trace_start);
+                    for (const auto * fused : node.fused) {
+                        ggml_exec_trace("fused_complete", "SPACEMIT0", fused, label.c_str());
+                    }
+                }
             }
 
             ctx.clear();

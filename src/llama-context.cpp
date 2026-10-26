@@ -1,3 +1,4 @@
+#include "../ggml/src/ggml-exec-trace.h"
 #include "llama-context.h"
 
 #include "ggml.h"
@@ -2762,7 +2763,15 @@ ggml_status llama_context::graph_compute(
 
     copy_experts.reset();
 
+    const bool trace = ggml_exec_trace_enabled() && ggml_graph_n_nodes(gf) > 0;
+    const char * role = cparams.ctx_type == LLAMA_CONTEXT_TYPE_MTP ? "mtp" : "target";
+    if (trace) { ggml_exec_trace("context_begin", "scheduler", ggml_graph_node(gf, 0), role); }
     auto status = ggml_backend_sched_graph_compute_async(sched.get(), gf);
+    if (trace) {
+        ggml_backend_sched_synchronize(sched.get());
+        ggml_exec_trace(status == GGML_STATUS_SUCCESS ? "context_complete" : "context_failed",
+                        "scheduler", ggml_graph_node(gf, 0), role);
+    }
     if (status != GGML_STATUS_SUCCESS) {
         LLAMA_LOG_ERROR("%s: ggml_backend_sched_graph_compute_async failed with error %d\n", __func__, status);
     }
