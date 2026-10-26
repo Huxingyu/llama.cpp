@@ -75,6 +75,37 @@ def test_completion_stream(prompt: str, n_predict: int, re_content: str, n_promp
             content += data["content"]
 
 
+@pytest.mark.parametrize("stream", [False, True])
+@pytest.mark.parametrize("cache_prompt", [False, True])
+def test_completion_zero_budget(stream: bool, cache_prompt: bool):
+    server.start()
+    request = {
+        "prompt": "I believe the meaning of life is",
+        "n_predict": 0,
+        "return_tokens": True,
+        "cache_prompt": cache_prompt,
+    }
+    for _ in range(2):
+        if stream:
+            chunks = list(server.make_stream_request("POST", "/completion", data={**request, "stream": True}))
+            assert chunks and chunks[-1]["stop"]
+            assert all(not chunk.get("content") and not chunk.get("tokens") for chunk in chunks)
+            result = chunks[-1]
+        else:
+            response = server.make_request("POST", "/completion", data=request)
+            assert response.status_code == 200
+            result = response.body
+            assert result["content"] == "" and result["tokens"] == []
+        assert result["tokens_predicted"] == 0
+        assert result["timings"]["predicted_n"] == 0
+        assert result["stop_type"] == "limit"
+        # The slot and its cached prompt must remain usable after prompt-only completion.
+        response = server.make_request("POST", "/completion", data={**request, "n_predict": 1, "ignore_eos": True})
+        assert response.status_code == 200
+        assert response.body["tokens_predicted"] == 1
+        assert len(response.body["tokens"]) == 1
+
+
 def test_completion_stream_vs_non_stream():
     global server
     server.start()

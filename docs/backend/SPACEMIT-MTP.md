@@ -32,6 +32,7 @@ Neither setting changes the device type or the sampling algorithm.
 | Embedding GET_ROWS | F16, BF16 and quantized rows dequantize to F32. Packed weights read only the requested canonical row. This covers the pinned model's Q6_K embedding as well as Q4 formats. |
 | TOP_K | Partial sorting follows the CPU implementation, including ties, infinities and its final output swap, so backend sampler graphs do not need this CPU fallback. |
 | M2/M3 quantization candidate | `GGML_SPACEMIT_SMALL_M_QUANT=1` partitions independent row/K blocks across workers. M4 retains its interleaved four-row quantizer. The candidate is disabled by default pending board measurements. |
+| Server prompt-only requests | A zero output budget finishes after prompt evaluation, before sampling. This applies to streaming and ordinary responses and preserves prompt-cache reuse. |
 | Speculative example limits | Count actual emissions including EOG, stop at zero/exhausted budgets, bypass the speculator's special zero-draft default when only one token remains, and propagate decode errors. |
 
 ## Diagnostics
