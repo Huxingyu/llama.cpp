@@ -200,7 +200,12 @@ int main(int argc, char ** argv) {
                 /* .result     = */ &draft, // output
             };
             const int64_t draft_start = ggml_time_us();
-            common_speculative_draft(spec);
+            // n_max == 0 means "use the configured default" to the
+            // speculator, not "draft no tokens". Bypass it when the last
+            // remaining output token must come directly from the target.
+            if (n_draft_max > 0) {
+                common_speculative_draft(spec);
+            }
             common_mtp_trace("draft", round, draft, int(draft.size()), 0, ggml_time_us() - draft_start);
 
             // save a checkpoint of the target context before evaluating the draft
@@ -317,7 +322,8 @@ int main(int argc, char ** argv) {
         // this is the standard token post-processing that we normally do
         // in this case, we do it for a group of accepted tokens at once
         //
-        for (size_t i = 0; i < ids.size(); ++i) {
+        for (size_t i = 0; i < ids.size() &&
+                (params.n_predict < 0 || n_predict < params.n_predict); ++i) {
             prompt_tgt.push_back(id_last);
 
             id_last = ids[i];
