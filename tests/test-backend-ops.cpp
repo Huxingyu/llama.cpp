@@ -9623,6 +9623,24 @@ static const ggml_type other_types[] = {
 // Test cases for evaluation: should try to cover edge cases while using small input sizes to keep the runtime low
 static std::vector<std::unique_ptr<test_case>> make_test_cases_eval() {
     std::vector<std::unique_ptr<test_case>> test_cases;
+    // Focused functional coverage for single-token draft and small-batch
+    // verification. Test n is the activation row count (gemm_m in ime.cpp).
+    if (const char * focused = getenv("OSPP_MTP_SMALL_MATMUL"); focused && strcmp(focused, "1") == 0) {
+        std::vector<int64_t> output_columns = {16, 32};
+        const char * extended = getenv("OSPP_MTP_EXTENDED");
+        if (extended && strcmp(extended, "1") == 0) {
+            output_columns.insert(output_columns.end(), {48, 64, 96});
+        }
+        for (int64_t m : output_columns) {
+            for (int64_t k : {32, 64, 128, 256, 512, 1024}) {
+                for (int64_t n : {1, 2, 3, 4, 5}) {
+                    test_cases.emplace_back(new test_mul_mat(GGML_TYPE_Q4_0, GGML_TYPE_F32,
+                                                            m, n, k, {1, 1}, {1, 1}));
+                }
+            }
+        }
+        return test_cases;
+    }
     std::default_random_engine rng(0);
 
     // unary ops
@@ -12721,6 +12739,13 @@ static bool test_backend(ggml_backend_t backend, ggml_backend_dev_t dev, test_mo
 
         std::atomic<size_t> n_ok = 0;
         std::atomic<size_t> tests_run = 0;
+        std::atomic<size_t> n_skipped = 0;
+        std::atomic<size_t> n_unsupported = 0;
+        const char * canonical_env = getenv("OSPP_CANONICAL_INPUTS");
+        const bool canonical_inputs = canonical_env && strcmp(canonical_env, "1") == 0;
+        if (canonical_inputs) {
+            printf("OSPP_INPUT_ORDER source=CPU target=%s\n", ggml_backend_name(backend));
+        }
         std::vector<std::string> failed_tests;
         std::mutex failed_tests_mutex;
 
@@ -12744,8 +12769,18 @@ static bool test_backend(ggml_backend_t backend, ggml_backend_dev_t dev, test_mo
             while (my_begin < test_cases.size()) {
                 for (size_t i = my_begin; i < my_end; ++i) {
                     auto & test = test_cases[i];
-                    test_status_t status = test->eval(b, b_cpu, op_names_filter, output_printer);
-                    if (status == test_status_t::SKIPPED || status == test_status_t::NOT_SUPPORTED) {
+                    // A packed backend's raw get_tensor is not necessarily a
+                    // canonical weight representation. Initialize on CPU and
+                    // copy into the target via its existing setter instead.
+                    test_status_t status = canonical_inputs
+                        ? test->eval(b_cpu, b, op_names_filter, output_printer)
+                        : test->eval(b, b_cpu, op_names_filter, output_printer);
+                    if (status == test_status_t::SKIPPED) {
+                        n_skipped++;
+                        continue;
+                    }
+                    if (status == test_status_t::NOT_SUPPORTED) {
+                        n_unsupported++;
                         continue;
                     }
                     tests_run++;
@@ -12801,10 +12836,16 @@ static bool test_backend(ggml_backend_t backend, ggml_backend_dev_t dev, test_mo
 
         output_printer->print_summary(test_summary_info(n_ok, tests_run, false));
         output_printer->print_failed_tests(failed_tests);
+        printf("OSPP_COUNTS selected=%zu executed=%zu passed=%zu failed=%zu unsupported=%zu skipped=%zu\n",
+               test_cases.size(), tests_run.load(), n_ok.load(), tests_run.load() - n_ok.load(),
+               n_unsupported.load(), n_skipped.load());
 
         const bool slice_ok = run_fa_vec_slice(backend, backend_cpu.get(), op_names_filter);
 
-        return n_ok == tests_run && slice_ok;
+        const char * focused = getenv("OSPP_MTP_SMALL_MATMUL");
+        const bool focused_complete = !focused || strcmp(focused, "1") != 0 ||
+                                      (tests_run > 0 && tests_run == test_cases.size());
+        return n_ok == tests_run && slice_ok && focused_complete;
     }
 
     if (mode == MODE_GRAD) {
