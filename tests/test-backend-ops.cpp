@@ -9645,6 +9645,22 @@ static std::vector<std::unique_ptr<test_case>> make_test_cases_eval() {
         }
         return test_cases;
     }
+    if (const char * gather = getenv("OSPP_MTP_GATHER"); gather && strcmp(gather, "1") == 0) {
+        for (ggml_type type : {GGML_TYPE_F16, GGML_TYPE_BF16, GGML_TYPE_Q4_0, GGML_TYPE_Q4_1,
+                               GGML_TYPE_Q4_K, GGML_TYPE_Q5_0, GGML_TYPE_Q8_0}) {
+            for (int width : {32, 256}) {
+                if (width % ggml_blck_size(type) != 0) { continue; }
+                for (int rows : {16, 32, 48}) {
+                    for (int count : {1, 3, 4}) {
+                        for (int batch : {1, 2}) {
+                            test_cases.emplace_back(new test_get_rows(type, width, rows, count, batch));
+                        }
+                    }
+                }
+            }
+        }
+        return test_cases;
+    }
     // Exercise expert routing with single-token drafts and small verification batches.
     if (const char * moe = getenv("OSPP_MTP_MOE"); moe && strcmp(moe, "1") == 0) {
         for (int experts : {2, 4, 8}) {
@@ -12887,8 +12903,11 @@ static bool test_backend(ggml_backend_t backend, ggml_backend_dev_t dev, test_mo
         const char * focused = getenv("OSPP_MTP_SMALL_MATMUL");
         const char * moe = getenv("OSPP_MTP_MOE");
         const char * state = getenv("OSPP_MTP_STATE");
+        const char * gather = getenv("OSPP_MTP_GATHER");
         const bool focused_requested = (focused && strcmp(focused, "1") == 0) ||
-                                       (moe && strcmp(moe, "1") == 0) || (state && strcmp(state, "1") == 0);
+                                       (moe && strcmp(moe, "1") == 0) ||
+                                       (state && strcmp(state, "1") == 0) ||
+                                       (gather && strcmp(gather, "1") == 0);
         const bool focused_complete = !focused_requested ||
                                       (tests_run > 0 && tests_run == test_cases.size());
         return n_ok == tests_run && slice_ok && focused_complete;

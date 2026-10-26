@@ -75,6 +75,8 @@ void forward_cont_with_permute(ggml::spacemit::context & ctx, ggml_tensor * op);
 
 void forward_cpy_with_permute(ggml::spacemit::context & ctx, ggml_tensor * op);
 
+void forward_get_rows_dequant(ggml::spacemit::context & ctx, ggml_tensor * op);
+
 template <typename T> void forward_get_rows(ggml::spacemit::context & ctx, ggml_tensor * op);
 
 template <typename T> void forward_concat(ggml::spacemit::context & ctx, ggml_tensor * op);

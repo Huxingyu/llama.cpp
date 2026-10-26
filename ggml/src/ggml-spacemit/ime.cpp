@@ -1302,6 +1302,12 @@ class tensor_traits_common : public ggml::spacemit::tensor_traits_base {
                 return true;
             case GGML_OP_GET_ROWS:
                 {
+                    if (op->type == GGML_TYPE_F32 && op->src[0]->type != GGML_TYPE_F32 &&
+                        ggml_get_type_traits(op->src[0]->type)->to_float) {
+                        if (ctx.ith == 0) { ggml_exec_trace("kernel_selected", "SPACEMIT0", op, "canonical/dequant_get_rows"); }
+                        spacemit_kernels::rvv::forward_get_rows_dequant(ctx, op);
+                        return true;
+                    }
                     if (op->src[0]->type == op->type) {
                         switch (op->src[0]->type) {
                             case GGML_TYPE_F32:
@@ -1953,6 +1959,12 @@ const ggml::spacemit::tensor_traits_base * ggml_spacemit_get_tensor_traits(const
             }
             break;
         case GGML_OP_GET_ROWS:
+            if (op->src[0] && op->src[1] && op->type == GGML_TYPE_F32 &&
+                op->src[1]->type == GGML_TYPE_I32 && ggml_get_type_traits(op->src[0]->type)->to_float &&
+                op->src[0]->nb[0] == ggml_type_size(op->src[0]->type) &&
+                (op->src[0]->extra == nullptr || ggml_is_contiguous(op->src[0]))) {
+                return common;
+            }
             if (op->src[0] && op->src[1] &&
                 (op->src[0]->type == GGML_TYPE_F32 || op->src[0]->type == GGML_TYPE_F16) &&
                 op->type == op->src[0]->type &&

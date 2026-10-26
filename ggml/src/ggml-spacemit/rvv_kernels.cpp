@@ -1,3 +1,4 @@
+#include "ggml-backend.h"
 #include "rvv_kernels.h"
 
 #include "common.h"
@@ -3328,6 +3329,36 @@ template <typename T> void forward_repeat_dim1(ggml::spacemit::context & ctx, gg
                 }
             }
         }
+    }
+}
+
+// Quantized embedding rows can be physically packed for matmul as well.
+// Read only the requested canonical row, then dequantize into the F32 output.
+void forward_get_rows_dequant(ggml::spacemit::context & ctx, ggml_tensor * op) {
+    const ggml_tensor * weights = op->src[0];
+    const ggml_tensor * ids = op->src[1];
+    const auto to_float = ggml_get_type_traits(weights->type)->to_float;
+    GGML_ASSERT(to_float && op->type == GGML_TYPE_F32 && ids->type == GGML_TYPE_I32);
+    const size_t row_size = ggml_row_size(weights->type, weights->ne[0]);
+    // uint64_t backing keeps canonical quant blocks naturally aligned.
+    std::vector<uint64_t> canonical(weights->extra ? (row_size + 7) / 8 : 0);
+    const int64_t rows = ggml_nelements(ids);
+    for (int64_t row = ctx.ith; row < rows; row += ctx.nth) {
+        const int64_t i0 = row % ids->ne[0];
+        const int64_t i1 = row / ids->ne[0] % ids->ne[1];
+        const int64_t i2 = row / (ids->ne[0] * ids->ne[1]);
+        int32_t index;
+        memcpy(&index, static_cast<const char *>(ids->data) + i0 * ids->nb[0] + i1 * ids->nb[1] + i2 * ids->nb[2], sizeof(index));
+        GGML_ASSERT(index >= 0 && index < weights->ne[1]);
+        const size_t offset = index * weights->nb[1] + i1 * weights->nb[2] + i2 * weights->nb[3];
+        const void * source = static_cast<const char *>(weights->data) + offset;
+        if (weights->extra) {
+            ggml_backend_tensor_get(weights, canonical.data(), offset, row_size);
+            source = canonical.data();
+        }
+        auto * output = reinterpret_cast<float *>(static_cast<char *>(op->data) +
+            i0 * op->nb[1] + i1 * op->nb[2] + i2 * op->nb[3]);
+        to_float(source, output, weights->ne[0]);
     }
 }
 
