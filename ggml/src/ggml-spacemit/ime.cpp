@@ -353,6 +353,24 @@ class tensor_traits : public ggml::spacemit::tensor_traits_base {
                 quantize_a_row_i8(a_blk_len, feature + a_blk_start * a_blk_len, (a_blk_end - a_blk_start) * a_blk_len,
                                   quant_a_buffer + a_blk_start * block_stride_a);
             }
+        } else if (gemm_m < row_align && nth > 1 && [] {
+            const char * value = std::getenv("GGML_SPACEMIT_SMALL_M_QUANT");
+            return value && std::strcmp(value, "1") == 0;
+        }()) {
+            // For M=2/3 each row is independently quantized. Partition their
+            // K blocks as in M=1, preserving scales and the existing row layout.
+            // M=4 must retain its distinct four-row interleaved quantizer.
+            const int64_t tasks = gemm_m * a_k_blks;
+            int64_t begin = tasks * ith / nth;
+            const int64_t end = tasks * (ith + 1) / nth;
+            while (begin < end) {
+                const int64_t row = begin / a_k_blks;
+                const int64_t block = begin % a_k_blks;
+                const int64_t count = std::min<int64_t>(end - begin, a_k_blks - block);
+                quantize_a_row_i8(a_blk_len, feature + row * gemm_k + block * a_blk_len,
+                                  count * a_blk_len, quant_a_buffer + row * row_stride_a + block * block_stride_a);
+                begin += count;
+            }
         } else {
             int task_per_thread = spacemit_kernels::div_round_up(row_blks, nth);
             int m_row_blk_start = ith * task_per_thread;
