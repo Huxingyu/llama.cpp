@@ -116,6 +116,7 @@ void forward_set_rows(ggml::spacemit::context & ctx, ggml_tensor * op);
 void forward_rope(ggml::spacemit::context & ctx, ggml_tensor * op);
 
 template <typename T> void forward_sum_rows(ggml::spacemit::context & ctx, ggml_tensor * op);
+void forward_sum_f32(ggml::spacemit::context & ctx, ggml_tensor * op);
 
 template <typename T> void forward_repeat_nrows(ggml::spacemit::context & ctx, ggml_tensor * op);
 

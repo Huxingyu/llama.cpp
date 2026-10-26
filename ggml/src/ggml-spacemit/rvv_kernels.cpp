@@ -3092,6 +3092,44 @@ template <ggml_op op_type, typename T> void forward_binary(ggml::spacemit::conte
     }
 }
 
+void forward_sum_f32(ggml::spacemit::context & ctx, ggml_tensor * op) {
+    const ggml_tensor * src = op->src[0];
+    GGML_ASSERT(src->type == GGML_TYPE_F32 && src->nb[0] == sizeof(float));
+    GGML_ASSERT(op->type == GGML_TYPE_F32 && ggml_is_scalar(op));
+    constexpr size_t stride = 64 / sizeof(double);
+    GGML_ASSERT(ctx.workspace_size >= ctx.nth * stride * sizeof(double));
+    auto * partials = static_cast<double *>(ctx.workspace);
+    double total = 0.0;
+    const int64_t rows = ggml_nrows(src);
+    const int64_t per_worker = (rows + ctx.nth - 1) / ctx.nth;
+    const int64_t end = std::min<int64_t>((ctx.ith + 1) * per_worker, rows);
+    for (int64_t row = ctx.ith * per_worker; row < end; ++row) {
+        const int64_t i1 = row % src->ne[1];
+        const int64_t i2 = row / src->ne[1] % src->ne[2];
+        const int64_t i3 = row / (src->ne[1] * src->ne[2]);
+        const auto * values = reinterpret_cast<const float *>(
+            static_cast<const char *>(src->data) + i1 * src->nb[1] + i2 * src->nb[2] + i3 * src->nb[3]);
+        vfloat64m1_t accumulator = __riscv_vfmv_v_f_f64m1(0.0, 1);
+        for (int64_t col = 0; col < src->ne[0];) {
+            const size_t vl = __riscv_vsetvl_e32m1(src->ne[0] - col);
+            const vfloat32m1_t input = __riscv_vle32_v_f32m1(values + col, vl);
+            const vfloat64m2_t wide = __riscv_vfwcvt_f_f_v_f64m2(input, vl);
+            accumulator = __riscv_vfredosum_vs_f64m2_f64m1(wide, accumulator, vl);
+            col += vl;
+        }
+        total += __riscv_vfmv_f_s_f64m1_f64(accumulator);
+    }
+    partials[ctx.ith * stride] = total;
+    ctx.sync();
+    if (ctx.ith == 0) {
+        double sum = 0.0;
+        for (uint32_t worker = 0; worker < ctx.nth; ++worker) {
+            sum += partials[worker * stride];
+        }
+        *static_cast<float *>(op->data) = static_cast<float>(sum);
+    }
+}
+
 template <typename T> void forward_sum_rows(ggml::spacemit::context & ctx, ggml_tensor * op) {
     const ggml_tensor * src0 = op->src[0];
     ggml_tensor *       dst  = op;

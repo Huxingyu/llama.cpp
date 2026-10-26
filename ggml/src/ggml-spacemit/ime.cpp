@@ -987,6 +987,9 @@ class tensor_traits : public ggml::spacemit::tensor_traits_base {
 class tensor_traits_common : public ggml::spacemit::tensor_traits_base {
     bool work_size(int n_threads, const ggml_tensor * op, size_t & size) const override {
         switch (op->op) {
+            case GGML_OP_SUM:
+                size = static_cast<size_t>(n_threads) * 64;
+                return true;
             case GGML_OP_MUL_MAT:
                 if (op->src[0] && op->src[1] && op->src[1]->type == GGML_TYPE_F32) {
                     const auto * traits = ggml_get_type_traits_cpu(op->src[0]->type);
@@ -1285,6 +1288,9 @@ class tensor_traits_common : public ggml::spacemit::tensor_traits_base {
                     return false;
                 }
                 return true;
+            case GGML_OP_SUM:
+                spacemit_kernels::rvv::forward_sum_f32(ctx, op);
+                return true;
             case GGML_OP_SUM_ROWS:
                 {
                     if (op->src[0]->type == GGML_TYPE_F32 && op->type == GGML_TYPE_F32) {
@@ -1359,9 +1365,22 @@ class tensor_traits_common : public ggml::spacemit::tensor_traits_base {
             case GGML_OP_SOLVE_TRI:
                 spacemit_kernels::scalar::forward_solve_tri_f32(ctx, op);
                 return true;
-            case GGML_OP_GATED_DELTA_NET:
-                spacemit_kernels::rvv::forward_gated_delta_net(ctx, op);
+            case GGML_OP_GATED_DELTA_NET: {
+                // The RVV kernel requires a complete state row in one m8
+                // vector. K1's shorter VLEN must use the scalar reference for
+                // larger heads rather than reject GDN or trip that assertion.
+                const int64_t width = op->src[2]->ne[0];
+                const bool vector = width <= 512 && width <= (int64_t) __riscv_vsetvlmax_e32m8();
+                if (ctx.ith == 0) {
+                    ggml_exec_trace("kernel_selected", "SPACEMIT0", op, vector ? "RVV/GDN" : "scalar/GDN");
+                }
+                if (vector) {
+                    spacemit_kernels::rvv::forward_gated_delta_net(ctx, op);
+                } else {
+                    spacemit_kernels::scalar::forward_gated_delta_net(ctx, op);
+                }
                 return true;
+            }
             case GGML_OP_ARGSORT:
                 spacemit_kernels::scalar::forward_argsort_f32(ctx, op);
                 return true;
@@ -1922,6 +1941,12 @@ const ggml::spacemit::tensor_traits_base * ggml_spacemit_get_tensor_traits(const
                 }
             }
             break;
+        case GGML_OP_SUM:
+            if (op->src[0] && op->src[0]->type == GGML_TYPE_F32 &&
+                op->src[0]->nb[0] == sizeof(float) && op->type == GGML_TYPE_F32 && ggml_is_scalar(op)) {
+                return common;
+            }
+            break;
         case GGML_OP_SUM_ROWS:
             if (op->src[0] && op->src[0]->type == GGML_TYPE_F32 && op->type == GGML_TYPE_F32) {
                 return common;
@@ -2027,11 +2052,15 @@ const ggml::spacemit::tensor_traits_base * ggml_spacemit_get_tensor_traits(const
                 op->type == GGML_TYPE_F32)
                 return common;
             break;
-        case GGML_OP_GATED_DELTA_NET:
-            if (ggml::cpu::riscv64_spacemit::global_spine_env_info.use_ime2) {
-                return common;
+        case GGML_OP_GATED_DELTA_NET: {
+            bool valid = op->type == GGML_TYPE_F32 && ggml_is_contiguous(op);
+            for (int i = 0; i < 6; ++i) {
+                valid = valid && op->src[i] && op->src[i]->type == GGML_TYPE_F32 &&
+                        op->src[i]->nb[0] == sizeof(float);
             }
+            if (valid) { return common; }
             break;
+        }
         case GGML_OP_SSM_CONV:
             if (op->src[0] && op->src[0]->type == GGML_TYPE_F32)
                 return common;

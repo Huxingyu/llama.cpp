@@ -1,3 +1,4 @@
+#include "../ggml-exec-trace.h"
 #include <assert.h>
 #include <inttypes.h>
 #include <stdio.h>
@@ -861,6 +862,7 @@ static bool ggml_backend_spacemit_device_supports_op(ggml_backend_dev_t dev, con
         case GGML_OP_SET_ROWS:
         case GGML_OP_CONT:
         case GGML_OP_REPEAT:
+        case GGML_OP_SUM:
         case GGML_OP_SUM_ROWS:
         case GGML_OP_SOFT_MAX:
         case GGML_OP_FLASH_ATTN_EXT:

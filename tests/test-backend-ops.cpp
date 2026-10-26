@@ -9623,6 +9623,28 @@ static const ggml_type other_types[] = {
 // Test cases for evaluation: should try to cover edge cases while using small input sizes to keep the runtime low
 static std::vector<std::unique_ptr<test_case>> make_test_cases_eval() {
     std::vector<std::unique_ptr<test_case>> test_cases;
+    // Reductions and recurrent-cache snapshots used by MTP graphs.
+    if (const char * state = getenv("OSPP_MTP_STATE"); state && strcmp(state, "1") == 0) {
+        for (int64_t width : {1, 7, 8, 9, 31, 33, 257}) {
+            test_cases.emplace_back(new test_sum(GGML_TYPE_F32, {width, 1, 1, 1}));
+            test_cases.emplace_back(new test_sum(GGML_TYPE_F32, {width, 5, 3, 2}));
+            test_cases.emplace_back(new test_sum(GGML_TYPE_F32, {width, 5, 3, 2}, {0, 2, 1, 3}));
+            test_cases.emplace_back(new test_sum(GGML_TYPE_F32, {width, 5, 3, 2}, {0, 3, 2, 1}));
+        }
+        test_cases.emplace_back(new test_gated_delta_net_cache_fusion(GGML_TYPE_F32, 4, 32, 2, 1, 2));
+        test_cases.emplace_back(new test_gated_delta_net_cache_fusion(GGML_TYPE_F32, 4, 64, 4, 1, 2));
+        test_cases.emplace_back(new test_gated_delta_net_cache_fusion(GGML_TYPE_F32, 4, 128, 3, 1, 3));
+        test_cases.emplace_back(new test_gated_delta_net_cache_fusion(GGML_TYPE_F32, 4, 32, 4, 1, 4));
+        test_cases.emplace_back(new test_gated_delta_net_cache_fusion(GGML_TYPE_F32, 8, 32, 4, 2, 4));
+        test_cases.emplace_back(new test_gated_delta_net_cache_fusion(GGML_TYPE_F32, 4, 32, 8, 1, 4));
+        for (int64_t rows : {1, 2, 3, 4}) {
+            test_cases.emplace_back(new test_cpy(GGML_TYPE_F32, GGML_TYPE_F32,
+                {33, rows, 2, 1}, {-1, -1, -1, -1}, {0, 0, 0, 0}, {0, 0, 0, 0}, false, {40, rows + 2, 3, 1}));
+            test_cases.emplace_back(new test_cpy(GGML_TYPE_F32, GGML_TYPE_F32,
+                {33, rows, 2, 1}, {-1, -1, -1, -1}, {0, 2, 1, 3}));
+        }
+        return test_cases;
+    }
     // Exercise expert routing with single-token drafts and small verification batches.
     if (const char * moe = getenv("OSPP_MTP_MOE"); moe && strcmp(moe, "1") == 0) {
         for (int experts : {2, 4, 8}) {
@@ -12864,7 +12886,9 @@ static bool test_backend(ggml_backend_t backend, ggml_backend_dev_t dev, test_mo
 
         const char * focused = getenv("OSPP_MTP_SMALL_MATMUL");
         const char * moe = getenv("OSPP_MTP_MOE");
-        const bool focused_requested = (focused && strcmp(focused, "1") == 0) || (moe && strcmp(moe, "1") == 0);
+        const char * state = getenv("OSPP_MTP_STATE");
+        const bool focused_requested = (focused && strcmp(focused, "1") == 0) ||
+                                       (moe && strcmp(moe, "1") == 0) || (state && strcmp(state, "1") == 0);
         const bool focused_complete = !focused_requested ||
                                       (tests_run > 0 && tests_run == test_cases.size());
         return n_ok == tests_run && slice_ok && focused_complete;
