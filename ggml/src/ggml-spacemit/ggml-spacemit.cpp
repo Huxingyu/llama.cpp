@@ -115,10 +115,6 @@ spine_env_info::spine_env_info() {
         }
     }
 
-    // Allocate init_barrier (needed by ime.cpp kernel barriers)
-    init_barrier = new spine_barrier_t[spine_init_barrier_count];
-    spine_barrier_init(init_barrier, spine_init_barrier_count, 2);
-
     std::string core_ids_str = "auto";
     if (!perfer_core_ids.empty()) {
         core_ids_str.clear();
@@ -129,11 +125,6 @@ spine_env_info::spine_env_info() {
     }
     GGML_LOG_INFO("ggml-spacemit: num_cores=%d, core_ids=%s, arch_id=0x%x, vlen=%zu, shared_mem=%zu, use_ime1=%d, use_ime2=%d\n",
                   num_cores, core_ids_str.c_str(), (unsigned) arch, info.vlen, info.shared_mem_size, use_ime1, use_ime2);
-}
-
-spine_env_info::~spine_env_info() {
-    delete[] init_barrier;
-    init_barrier = nullptr;
 }
 
 spine_env_info global_spine_env_info;

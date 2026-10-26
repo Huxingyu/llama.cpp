@@ -9623,6 +9623,26 @@ static const ggml_type other_types[] = {
 // Test cases for evaluation: should try to cover edge cases while using small input sizes to keep the runtime low
 static std::vector<std::unique_ptr<test_case>> make_test_cases_eval() {
     std::vector<std::unique_ptr<test_case>> test_cases;
+    // Exercise expert routing with single-token drafts and small verification batches.
+    if (const char * moe = getenv("OSPP_MTP_MOE"); moe && strcmp(moe, "1") == 0) {
+        for (int experts : {2, 4, 8}) {
+            for (int used : {1, 2}) {
+                for (int64_t m : {16, 32, 48}) {
+                    for (int64_t n : {1, 2, 3, 4}) {
+                        for (int64_t k : {32, 256}) {
+                            for (bool broadcast : {false, true}) {
+                                test_cases.emplace_back(new test_mul_mat_id(
+                                    GGML_TYPE_Q4_0, GGML_TYPE_F32, experts, used, broadcast, m, n, k));
+                                test_cases.emplace_back(new test_mul_mat_id_dup(
+                                    GGML_TYPE_Q4_0, GGML_TYPE_F32, experts, used, broadcast, m, n, k));
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        return test_cases;
+    }
     // Focused functional coverage for single-token draft and small-batch
     // verification. Test n is the activation row count (gemm_m in ime.cpp).
     if (const char * focused = getenv("OSPP_MTP_SMALL_MATMUL"); focused && strcmp(focused, "1") == 0) {
@@ -12843,7 +12863,9 @@ static bool test_backend(ggml_backend_t backend, ggml_backend_dev_t dev, test_mo
         const bool slice_ok = run_fa_vec_slice(backend, backend_cpu.get(), op_names_filter);
 
         const char * focused = getenv("OSPP_MTP_SMALL_MATMUL");
-        const bool focused_complete = !focused || strcmp(focused, "1") != 0 ||
+        const char * moe = getenv("OSPP_MTP_MOE");
+        const bool focused_requested = (focused && strcmp(focused, "1") == 0) || (moe && strcmp(moe, "1") == 0);
+        const bool focused_complete = !focused_requested ||
                                       (tests_run > 0 && tests_run == test_cases.size());
         return n_ok == tests_run && slice_ok && focused_complete;
     }

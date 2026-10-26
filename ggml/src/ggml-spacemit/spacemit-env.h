@@ -1,6 +1,5 @@
 #pragma once
 
-#include "spine_barrier.h"
 #include "spine_mem_pool.h"
 
 #include <cstddef>
@@ -8,8 +7,6 @@
 #include <vector>
 
 namespace ggml::cpu::riscv64_spacemit {
-
-inline constexpr size_t spine_init_barrier_count = 16;
 
 enum class spine_core_arch_id : uint16_t {
     core_arch_none = 0,
@@ -28,11 +25,10 @@ struct spine_env_info {
     bool                   use_ime2{ false };
     bool                   use_ime1{ false };
     spine_mem_pool_backend mem_backend{ spine_mem_pool_backend::transparent_hugepage };
-    spine_barrier_t *      init_barrier{ nullptr };
     std::vector<int>       perfer_core_ids;
 
     spine_env_info();
-    ~spine_env_info();
+    ~spine_env_info() = default;
 };
 
 extern spine_env_info global_spine_env_info;

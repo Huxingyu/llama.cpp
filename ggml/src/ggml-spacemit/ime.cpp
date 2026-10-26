@@ -155,10 +155,11 @@ class tensor_traits : public ggml::spacemit::tensor_traits_base {
                     size = GGML_PAD(size, sizeof(int64_t));
 
                     const int64_t ne02 = op->src[0]->ne[2];  // n_as, n_expert
-                    const int64_t ne12 = op->src[1]->ne[2];  // n_tokens
+                    const int64_t assignments = ggml_nelements(op->src[2]);
 
-                    const size_t sizeof_mmid_row_mapping = sizeof(int64_t);
-                    size += sizeof_mmid_row_mapping * ne02 * (ne12 + 1) + (ne02 + 1) * sizeof(int64_t);
+                    // Counts, two scalar counters, active experts, prefix offsets,
+                    // and one mapping per routed token (including duplicate IDs).
+                    size += (3 * ne02 + 2 + assignments) * sizeof(int64_t);
 
                     size = GGML_PAD(size, sizeof(int64_t));
 
@@ -667,16 +668,33 @@ class tensor_traits : public ggml::spacemit::tensor_traits_base {
             }
         }
 
-#define MMID_MATRIX_ROW(row_id, i1) matrix_rows[(row_id) *ne12 + (i1)]
+#define MMID_MATRIX_ROW(row_id, i1) matrix_rows[matrix_row_offsets[(row_id)] + (i1)]
 
         int64_t *          matrix_row_counts       = (int64_t *) (ws_ptr + gemm_workspace_size);
         int32_t *          valid_ep_count          = (int32_t *) (matrix_row_counts + n_as);
         int32_t *          valid_act_count         = (int32_t *) (valid_ep_count + 1);
         int64_t *          valid_matrix_row_counts = (int64_t *) (valid_act_count + 1);
-        mmid_row_mapping * matrix_rows             = (mmid_row_mapping *) (valid_matrix_row_counts + n_as);
+        int64_t *          matrix_row_offsets     = valid_matrix_row_counts + n_as;
+        mmid_row_mapping * matrix_rows             = (mmid_row_mapping *) (matrix_row_offsets + n_as + 1);
 
         if (ith == 0) {
             // initialize matrix_row_counts
+            memset(matrix_row_counts, 0, n_as * sizeof(int64_t));
+
+            // Build disjoint ranges from the actual routing counts. An expert
+            // can occur more than once per token; ne12 slots are insufficient.
+            for (int32_t token = 0; token < ids->ne[1]; ++token) {
+                for (int32_t slot = 0; slot < n_ids; ++slot) {
+                    const int32_t expert = *(const int32_t *) ((const char *) ids->data +
+                        token * ids->nb[1] + slot * ids->nb[0]);
+                    GGML_ASSERT(expert >= 0 && expert < n_as);
+                    ++matrix_row_counts[expert];
+                }
+            }
+            matrix_row_offsets[0] = 0;
+            for (int expert = 0; expert < n_as; ++expert) {
+                matrix_row_offsets[expert + 1] = matrix_row_offsets[expert] + matrix_row_counts[expert];
+            }
             memset(matrix_row_counts, 0, n_as * sizeof(int64_t));
 
             // group rows by src0 matrix
@@ -712,12 +730,6 @@ class tensor_traits : public ggml::spacemit::tensor_traits_base {
         const size_t row_stride_b      = b_k_blks * get_repacked_block_type_size<BLOC_TYPE, INTER_SIZE, NB_COLS>();
         const size_t expert_b_stride   = ne01 * row_stride_b;
         const size_t per_nb_cols_wsize = NB_COLS * row_stride_b;
-
-        const int64_t barrier_idx = static_cast<int64_t>(ith / 2);
-
-        GGML_ASSERT(global_spine_env_info.init_barrier != nullptr);
-        GGML_ASSERT(barrier_idx < spine_init_barrier_count);
-        spine_barrier_t * cur_barrier = &global_spine_env_info.init_barrier[barrier_idx];
 
         std::array<const uint8_t *, 2> src_workspaces;
         std::array<float *, 2>         dst_workspaces;
@@ -770,7 +782,7 @@ class tensor_traits : public ggml::spacemit::tensor_traits_base {
                 }
 
                 if (has_pair) {
-                    spine_barrier_wait(cur_barrier);
+                    ctx.pair_sync();
                 }
 
                 if (ith % 2 != 0) {
@@ -784,12 +796,12 @@ class tensor_traits : public ggml::spacemit::tensor_traits_base {
                 int64_t nb_real = std::min(ne01, NB_COLS);
                 for (int64_t ni = 0; ni < ne01; ni += NB_COLS) {
                     if (has_pair && ith % 2 != 0) {
-                        spine_barrier_wait(cur_barrier);
+                        ctx.pair_sync();
                     }
                     gemm_kernel(b_blk_len, a_row, b_col, b_col_zp, c_blk + ni, 1, nb_real, b_k_blks, ne01);
 
                     if (has_pair && ith % 2 == 0) {
-                        spine_barrier_wait(cur_barrier);
+                        ctx.pair_sync();
                     }
 
                     const int64_t next_ni = ni + NB_COLS;
