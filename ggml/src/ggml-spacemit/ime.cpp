@@ -337,12 +337,6 @@ class tensor_traits : public ggml::spacemit::tensor_traits_base {
         const int64_t per_mb_rows_wsize = row_align * row_stride_a;
         const int64_t per_nb_cols_wsize = NB_COLS * row_stride_b;
 
-        const int64_t barrier_idx = static_cast<int64_t>(ith / 2);
-
-        GGML_ASSERT(global_spine_env_info.init_barrier != nullptr);
-        GGML_ASSERT(barrier_idx < spine_init_barrier_count);
-        spine_barrier_t * cur_barrier = &global_spine_env_info.init_barrier[barrier_idx];
-
         if (gemm_m == 1) {
             int task_per_thread = spacemit_kernels::div_round_up(a_k_blks, nth);
             int a_blk_start     = ith * task_per_thread;
@@ -457,7 +451,7 @@ class tensor_traits : public ggml::spacemit::tensor_traits_base {
             }
 
             if (has_pair) {
-                spine_barrier_wait(cur_barrier);
+                ctx.pair_sync();
             }
 
             if (ith % 2 != 0 && active0) {
@@ -476,7 +470,7 @@ class tensor_traits : public ggml::spacemit::tensor_traits_base {
                 const int64_t nb_real = active ? std::min(gemm_n - ni, (int64_t) NB_COLS) : 0;
 
                 if (has_pair && ith % 2 != 0) {
-                    spine_barrier_wait(cur_barrier);
+                    ctx.pair_sync();
                 }
 
                 if (active) {
@@ -496,7 +490,7 @@ class tensor_traits : public ggml::spacemit::tensor_traits_base {
                 }
 
                 if (has_pair && ith % 2 == 0) {
-                    spine_barrier_wait(cur_barrier);
+                    ctx.pair_sync();
                 }
 
                 const int64_t next_ni = ni + NB_COLS * nth;

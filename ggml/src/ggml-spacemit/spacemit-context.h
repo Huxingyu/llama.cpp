@@ -6,6 +6,7 @@
 
 #include <cstddef>
 #include <cstdint>
+#include <stdexcept>
 
 struct spacemit_opnode;  // forward declaration (defined in spacemit-opnode.h)
 
@@ -15,6 +16,7 @@ inline constexpr size_t cache_line_size_f32 = 64 / sizeof(float);
 
 struct context {
     spert::Context *        runtime       = nullptr;
+    spert::Barrier *        pair_barrier  = nullptr;
     uint32_t                ith           = 0;
     uint32_t                nth           = 0;
     void *                  workspace     = nullptr;
@@ -22,8 +24,10 @@ struct context {
     spert::SharedBufferView shared        = {};
 
     void reset(spert::Context & runtime_in, uint32_t ith_in, uint32_t nth_in,
-               void * workspace_in, size_t workspace_size_in, spert::SharedBufferView shared_in) {
+               void * workspace_in, size_t workspace_size_in, spert::SharedBufferView shared_in,
+               spert::Barrier * pair_barrier_in) {
         runtime        = &runtime_in;
+        pair_barrier   = pair_barrier_in;
         ith            = ith_in;
         nth            = nth_in;
         workspace      = workspace_in;
@@ -33,6 +37,7 @@ struct context {
 
     void clear() {
         runtime        = nullptr;
+        pair_barrier   = nullptr;
         ith            = 0;
         nth            = 0;
         workspace      = nullptr;
@@ -41,6 +46,14 @@ struct context {
     }
 
     void sync() { runtime->sync(); }
+
+    // A raw spin wait can prevent another ready tile from resuming after
+    // a cooperative grid sync. Keep paired waits in the same runtime domain.
+    void pair_sync() {
+        if (pair_barrier == nullptr || runtime->barrier(*pair_barrier) != spert::Status::Ok) {
+            throw std::runtime_error("ggml-spacemit: pair barrier failed");
+        }
+    }
 };
 
 class tensor_traits_base {

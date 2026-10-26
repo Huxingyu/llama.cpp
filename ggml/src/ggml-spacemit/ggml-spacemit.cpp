@@ -620,10 +620,22 @@ static ggml_status ggml_backend_spacemit_graph_compute(ggml_backend_t backend, g
         return GGML_STATUS_FAILED;
     }
 
+    // Only complete worker pairs wait together. Barriers belong to this
+    // stream and outlive its launch; an unpaired final worker never waits.
+    std::vector<spert::Barrier> pair_barriers;
+    pair_barriers.reserve(n_threads / 2);
+    for (int pair = 0; pair < n_threads / 2; ++pair) {
+        auto barrier = stream.make_barrier(2);
+        if (!barrier.valid()) {
+            return GGML_STATUS_ALLOC_FAILED;
+        }
+        pair_barriers.emplace_back(std::move(barrier));
+    }
+
     auto * contexts = sess->contexts.data();
     auto fut = stream.launch(
         spert::Grid{(uint32_t)n_threads},
-        [&opnodes, workspace_size = sess->workspace_size, workspace, contexts,
+        [&opnodes, &pair_barriers, workspace_size = sess->workspace_size, workspace, contexts,
          shared_mem_size = spert::backend_info().shared_mem_size](spert::Context * runtime) {
             // Match the old ggml-cpu/spacemit path: use the complete
             // worker-local TCM buffer directly.  alloc_shared() is a
@@ -637,7 +649,8 @@ static ggml_status ggml_backend_spacemit_graph_compute(ggml_backend_t backend, g
 
             const uint32_t ith = runtime->program_id(0);
             auto & ctx = contexts[ith];
-            ctx.reset(*runtime, ith, runtime->grid_dim(0), workspace, workspace_size, shared);
+            auto * pair_barrier = ith / 2 < pair_barriers.size() ? &pair_barriers[ith / 2] : nullptr;
+            ctx.reset(*runtime, ith, runtime->grid_dim(0), workspace, workspace_size, shared, pair_barrier);
 
             for (const auto & node : opnodes) {
                 ggml_tensor * op = node.node;
