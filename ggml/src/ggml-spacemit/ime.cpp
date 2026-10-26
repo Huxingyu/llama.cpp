@@ -1405,6 +1405,9 @@ class tensor_traits_common : public ggml::spacemit::tensor_traits_base {
                 }
                 return true;
             }
+            case GGML_OP_TOP_K:
+                spacemit_kernels::scalar::forward_top_k_f32(ctx, op);
+                return true;
             case GGML_OP_ARGSORT:
                 spacemit_kernels::scalar::forward_argsort_f32(ctx, op);
                 return true;
@@ -2094,6 +2097,13 @@ const ggml::spacemit::tensor_traits_base * ggml_spacemit_get_tensor_traits(const
         case GGML_OP_SSM_CONV:
             if (op->src[0] && op->src[0]->type == GGML_TYPE_F32)
                 return common;
+            break;
+        case GGML_OP_TOP_K:
+            if (op->src[0] && op->src[0]->type == GGML_TYPE_F32 && op->type == GGML_TYPE_I32 &&
+                op->src[0]->nb[0] == sizeof(float) && op->nb[0] == sizeof(int32_t) &&
+                op->ne[0] > 0 && op->ne[0] <= op->src[0]->ne[0]) {
+                return common;
+            }
             break;
         case GGML_OP_ARGSORT:
             if (op->src[0] && op->src[0]->type == GGML_TYPE_F32 && op->type == GGML_TYPE_I32 &&

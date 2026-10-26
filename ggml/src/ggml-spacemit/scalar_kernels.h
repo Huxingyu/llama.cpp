@@ -5,6 +5,8 @@
 
 namespace spacemit_kernels::scalar {
 
+void forward_top_k_f32(ggml::spacemit::context & ctx, ggml_tensor * op);
+
 void forward_l2_norm_f32   (ggml::spacemit::context & ctx, ggml_tensor * op);
 void forward_fill_f32      (ggml::spacemit::context & ctx, ggml_tensor * op);
 void forward_cumsum_f32    (ggml::spacemit::context & ctx, ggml_tensor * op);

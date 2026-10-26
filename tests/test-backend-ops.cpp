@@ -9645,9 +9645,25 @@ static std::vector<std::unique_ptr<test_case>> make_test_cases_eval() {
         }
         return test_cases;
     }
+    if (const char * selection = getenv("OSPP_MTP_SELECTION"); selection && strcmp(selection, "1") == 0) {
+        for (int64_t width : {9, 33, 248320}) {
+            for (int k : {1, 7, 9}) {
+                for (bool ties : {false, true}) {
+                    test_cases.emplace_back(new test_top_k(GGML_TYPE_F32, {width, 2, 1, 1}, k, ties));
+                }
+            }
+        }
+        test_cases.emplace_back(new test_top_k_inf({248320, 1, 1, 1}, 10));
+        test_cases.emplace_back(new test_top_k_inf({4096, 2, 1, 1}, 10));
+        for (int64_t tokens : {1, 2, 3, 4}) {
+            test_cases.emplace_back(new test_set_rows(GGML_TYPE_F32, GGML_TYPE_F16, GGML_TYPE_I64,
+                {512, tokens, 1, 1}, {1, 1}, 16, false));
+        }
+        return test_cases;
+    }
     if (const char * gather = getenv("OSPP_MTP_GATHER"); gather && strcmp(gather, "1") == 0) {
         for (ggml_type type : {GGML_TYPE_F16, GGML_TYPE_BF16, GGML_TYPE_Q4_0, GGML_TYPE_Q4_1,
-                               GGML_TYPE_Q4_K, GGML_TYPE_Q5_0, GGML_TYPE_Q8_0}) {
+                               GGML_TYPE_Q4_K, GGML_TYPE_Q5_0, GGML_TYPE_Q6_K, GGML_TYPE_Q8_0}) {
             for (int width : {32, 256}) {
                 if (width % ggml_blck_size(type) != 0) { continue; }
                 for (int rows : {16, 32, 48}) {
@@ -12904,10 +12920,12 @@ static bool test_backend(ggml_backend_t backend, ggml_backend_dev_t dev, test_mo
         const char * moe = getenv("OSPP_MTP_MOE");
         const char * state = getenv("OSPP_MTP_STATE");
         const char * gather = getenv("OSPP_MTP_GATHER");
+        const char * selection = getenv("OSPP_MTP_SELECTION");
         const bool focused_requested = (focused && strcmp(focused, "1") == 0) ||
                                        (moe && strcmp(moe, "1") == 0) ||
                                        (state && strcmp(state, "1") == 0) ||
-                                       (gather && strcmp(gather, "1") == 0);
+                                       (gather && strcmp(gather, "1") == 0) ||
+                                       (selection && strcmp(selection, "1") == 0);
         const bool focused_complete = !focused_requested ||
                                       (tests_run > 0 && tests_run == test_cases.size());
         return n_ok == tests_run && slice_ok && focused_complete;

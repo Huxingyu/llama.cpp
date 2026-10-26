@@ -121,6 +121,29 @@ void forward_argsort_f32(ggml::spacemit::context & ctx, ggml_tensor * op) {
     }
 }
 
+// Keep the CPU partial-sort order, including its final swap. This preserves
+// backend sampling behavior for tied values as well as standalone TOP_K sets.
+void forward_top_k_f32(ggml::spacemit::context & ctx, ggml_tensor * op) {
+    const ggml_tensor * src = op->src[0];
+    const int64_t width = src->ne[0];
+    const int64_t k = op->ne[0];
+    std::vector<int32_t> indices(width);
+    for (int64_t row = ctx.ith; row < ggml_nrows(src); row += ctx.nth) {
+        const int64_t i1 = row % src->ne[1];
+        const int64_t i2 = row / src->ne[1] % src->ne[2];
+        const int64_t i3 = row / (src->ne[1] * src->ne[2]);
+        const auto * values = reinterpret_cast<const float *>(static_cast<const char *>(src->data) +
+            i1 * src->nb[1] + i2 * src->nb[2] + i3 * src->nb[3]);
+        for (int64_t col = 0; col < width; ++col) { indices[col] = col; }
+        std::partial_sort(indices.begin(), indices.begin() + k, indices.end(),
+                          [values](int32_t a, int32_t b) { return values[a] > values[b]; });
+        auto * output = reinterpret_cast<int32_t *>(static_cast<char *>(op->data) +
+            i1 * op->nb[1] + i2 * op->nb[2] + i3 * op->nb[3]);
+        std::copy(indices.begin(), indices.begin() + k, output);
+        if (k > 1) { std::swap(output[0], output[1]); }
+    }
+}
+
 // ── CLAMP ────────────────────────────────────────────────────────────────────
 void forward_clamp_f32(ggml::spacemit::context & ctx, ggml_tensor * op) {
     const ggml_tensor * src0 = op->src[0];
