@@ -1,3 +1,4 @@
+#include "mtp-trace.h"
 #include "arg.h"
 #include "common.h"
 #include "console.h"
@@ -667,6 +668,7 @@ int llama_completion(int argc, char ** argv) {
             const llama_token id = common_sampler_sample(smpl, ctx, -1);
 
             common_sampler_accept(smpl, id, /* accept_grammar= */ true);
+            common_mtp_trace("emit", int(output_tokens.size()), {id});
 
             // LOG_DBG("last: %s\n", string_from(ctx, smpl->prev.to_vector()).c_str());
 
@@ -949,6 +951,7 @@ int llama_completion(int argc, char ** argv) {
     LOG("\n\n");
     common_perf_print(ctx, smpl);
 
+    common_mtp_trace("complete", -1);
     llama_backend_free();
 
     return 0;

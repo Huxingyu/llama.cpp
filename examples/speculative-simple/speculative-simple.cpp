@@ -1,3 +1,4 @@
+#include "mtp-trace.h"
 #include "arg.h"
 #include "common.h"
 #include "sampling.h"
@@ -130,7 +131,10 @@ int main(int argc, char ** argv) {
             batch_prompt.add(inp[i], i, seq_id, false);
         }
 
-        llama_process(ctx_tgt, LLAMA_PROCESS_TYPE_DECODE, batch_prompt.get());
+        if (llama_process(ctx_tgt, LLAMA_PROCESS_TYPE_DECODE, batch_prompt.get()) != 0) {
+            LOG_ERR("failed to decode target prompt\n");
+            return 1;
+        }
 
         if (!common_speculative_process(spec, batch_prompt)) {
             LOG_ERR("%s", "failed to process speculative prompt\n");
@@ -159,7 +163,9 @@ int main(int argc, char ** argv) {
 
     const auto t_dec_start = ggml_time_us();
 
-    while (true) {
+    int round = 0;
+    while (params.n_predict < 0 || n_predict < params.n_predict) {
+        ++round;
         // generate or reuse draft tokens
         //
         // this is the most important part of the speculation. the more probable tokens that are provided here
@@ -193,7 +199,9 @@ int main(int argc, char ** argv) {
                 /* .prompt     = */ &prompt_tgt,
                 /* .result     = */ &draft, // output
             };
+            const int64_t draft_start = ggml_time_us();
             common_speculative_draft(spec);
+            common_mtp_trace("draft", round, draft, int(draft.size()), 0, ggml_time_us() - draft_start);
 
             // save a checkpoint of the target context before evaluating the draft
             // this allows us to restore the state if partial draft acceptance occurs
@@ -222,6 +230,7 @@ int main(int argc, char ** argv) {
         batch_tgt.clear();
         batch_tgt.add(id_last, n_past++, seq_id, true);
 
+        const int64_t verify_start = ggml_time_us();
         // evaluate the target model on [id_last, draft0, draft1, ..., draftN-1]
         {
             for (size_t i = 0; i < draft.size(); ++i) {
@@ -229,13 +238,16 @@ int main(int argc, char ** argv) {
             }
 
 
-            llama_process(ctx_tgt, LLAMA_PROCESS_TYPE_DECODE, batch_tgt.get());
+            if (llama_process(ctx_tgt, LLAMA_PROCESS_TYPE_DECODE, batch_tgt.get()) != 0) {
+                LOG_ERR("failed to decode target verification batch\n");
+                return 1;
+            }
         }
 
         // feed the batch to the speculative implementation(s) - this drives the draft model, MTP, Eagle3, etc.
         if (!common_speculative_process(spec, batch_tgt)) {
             LOG_ERR("%s", "failed to process speculative batch\n");
-            break;
+            return 1;
         }
 
         // only save the sampler sampler state if we use checkpoints
@@ -259,6 +271,9 @@ int main(int argc, char ** argv) {
         //LOG_DBG("ids: %s\n", string_from(ctx_tgt, ids).c_str());
 
         GGML_ASSERT(ids.size() > 0); // there will always be at least one accepted token
+        const bool restoring = use_ckpt_tgt && ids.size() - 1 < n_draft;
+        common_mtp_trace("verify", round, ids, int(n_draft), int(ids.size() - 1),
+                         ggml_time_us() - verify_start, restoring);
 
         // check for partial draft acceptance:
         // if the context doesn't support partial sequence removal, restore the checkpoint
@@ -266,6 +281,7 @@ int main(int argc, char ** argv) {
         if (use_ckpt_tgt && ids.size() - 1 < n_draft) {
             LOG_DBG("partial acceptance: %zu < %zu, restoring checkpoint\n", ids.size() - 1, n_draft);
 
+            common_mtp_trace("restore", round);
             draft = std::move(ids);
 
             {
@@ -294,7 +310,7 @@ int main(int argc, char ** argv) {
         n_past    += ids.size() - 1;
         n_drafted += n_draft; // note: we ignore the discarded small drafts
         n_accept  += ids.size() - 1;
-        n_predict += ids.size();
+        // Count only tokens actually emitted, including EOG.
 
         // process the accepted tokens and update contexts
         //
@@ -305,6 +321,8 @@ int main(int argc, char ** argv) {
             prompt_tgt.push_back(id_last);
 
             id_last = ids[i];
+            ++n_predict;
+            common_mtp_trace("emit", round, {id_last});
 
             if (llama_vocab_is_eog(vocab, id_last)) {
                 has_eos = true;
@@ -335,7 +353,7 @@ int main(int argc, char ** argv) {
             }
         }
 
-        if ((params.n_predict >= 0 && n_predict > params.n_predict) || has_eos) {
+        if ((params.n_predict >= 0 && n_predict >= params.n_predict) || has_eos) {
             break;
         }
     }
@@ -354,7 +372,7 @@ int main(int argc, char ** argv) {
     LOG_INF("n_predict = %d\n", n_predict);
     LOG_INF("n_drafted = %d\n", n_drafted);
     LOG_INF("n_accept  = %d\n", n_accept);
-    LOG_INF("accept    = %.3f%%\n", 100.0f * n_accept / n_drafted);
+    LOG_INF("accept    = %.3f%%\n", n_drafted > 0 ? 100.0f * n_accept / n_drafted : 0.0f);
 
     LOG_INF("\n");
     LOG_INF("draft:\n\n");
@@ -367,6 +385,7 @@ int main(int argc, char ** argv) {
 
     common_speculative_free(spec);
 
+    common_mtp_trace("complete", round, {}, n_drafted, n_accept);
     llama_backend_free();
 
     LOG("\n\n");
